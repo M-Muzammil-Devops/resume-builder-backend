@@ -1,0 +1,180 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id               String            @id @default(cuid())
+  email            String            @unique
+  passwordHash     String
+  name             String?
+  role             String            @default("user")
+  location         String?
+  country          String?
+  lastLoginAt      DateTime?
+  emailVerifiedAt  DateTime?
+  sessionEpoch     Int               @default(0)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  resumes          Resume[]
+  coverLetters     CoverLetter[]
+  applications     JobApplication[]
+  autoApplyConfig  AutoApplyConfig?
+  autoApplyCredits AutoApplyCredit?
+  loginEvents      LoginEvent[]
+  authTokens       AuthToken[]
+
+  @@index([role])
+  @@index([country])
+  @@index([createdAt])
+  @@index([lastLoginAt])
+}
+
+model AuthToken {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  purpose   String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, purpose])
+  @@index([expiresAt])
+}
+
+model LoginEvent {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ip        String?
+  country   String?
+  city      String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([createdAt])
+  @@index([country])
+}
+
+model Resume {
+  id          String        @id @default(cuid())
+  userId      String
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title       String
+  templateId  String
+  layoutKey   String
+  content     Json
+  design      Json
+  isComplete     Boolean       @default(false)
+  shareEnabled   Boolean       @default(false)
+  shareToken     String?       @unique
+  shareExpiresAt DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  coverLetter CoverLetter?
+
+  @@index([userId])
+}
+
+model CoverLetter {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // BUG-315: a letter can exist without a resume, and survives the resume being deleted.
+  resumeId  String?  @unique
+  resume    Resume?  @relation(fields: [resumeId], references: [id], onDelete: SetNull)
+  title     String
+  body      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+}
+
+model Template {
+  id           String  @id
+  name         String
+  department   String
+  layoutKey    String
+  accentColor  String
+  fontFamily   String
+  isPremium    Boolean @default(false)
+  previewLabel String
+}
+
+/** Admin-uploaded landing templates (PDF + preview) */
+model LandingTemplate {
+  id          String   @id @default(cuid())
+  name        String
+  blurb       String   @default("")
+  department  String
+  layoutKey   String   @default("high-performer")
+  accentColor String   @default("#1c2b42")
+  fontFamily  String   @default("Lato")
+  hasPhoto    Boolean  @default(true)
+  columns     String   @default("double")
+  pdfPath     String
+  previewPath String
+  isActive    Boolean  @default(true)
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([isActive, sortOrder])
+  @@index([department])
+}
+
+model Job {
+  id           String           @id @default(cuid())
+  title        String
+  company      String
+  location     String
+  remote       Boolean          @default(false)
+  department   String
+  description  String
+  applyUrl     String
+  keywords     String[]
+  createdAt    DateTime         @default(now())
+  applications JobApplication[]
+}
+
+model JobApplication {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  jobId     String
+  job       Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  stage     String   @default("recommended")
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, jobId])
+  @@index([userId])
+}
+
+model AutoApplyConfig {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  roles     String[]
+  locations String[]
+  remote    Boolean  @default(true)
+  updatedAt DateTime @updatedAt
+}
+
+model AutoApplyCredit {
+  id         String @id @default(cuid())
+  userId     String @unique
+  user       User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  remaining  Int    @default(50)
+  processing Int    @default(0)
+  applied    Int    @default(0)
+}

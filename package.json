@@ -1,0 +1,46 @@
+{
+  "name": "resume-builder-backend",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate deploy && prisma generate",
+    "prisma:migrate:dev": "prisma migrate dev --name init",
+    "prisma:seed": "tsx prisma/seed.ts",
+    "browsers:install": "npx puppeteer browsers install chrome",
+    "test": "tsx --test src/lib/passwordPolicy.test.ts src/lib/publicUrl.test.ts src/lib/urls.test.ts src/lib/loginGuard.test.ts src/lib/sanitizeHtml.test.ts src/lib/publicResume.test.ts src/lib/planAccess.test.ts src/lib/shareBody.test.ts src/lib/keywords.test.ts src/lib/resumeContent.test.ts src/ai/rewriteFragment.test.ts src/lib/exportFormats.test.ts src/lib/safeLink.test.ts src/lib/httpErrors.test.ts src/lib/adminSearch.test.ts src/lib/adminGuard.test.ts src/lib/resumeSchema.test.ts src/lib/coverLetterInput.test.ts src/lib/exportText.test.ts src/lib/sampleMarks.test.ts ../frontend/src/lib/designScale.test.ts ../frontend/src/lib/linkHref.test.ts ../frontend/src/lib/csp.test.ts ../frontend/src/lib/sanitizeHtml.test.ts",
+    "test:e2e": "tsx --test src/e2e/api.e2e.test.ts",
+    "test:db": "tsx --test src/e2e/sessions.db.test.ts",
+    "sanitize:stored": "tsx src/scripts/sanitizeStored.ts"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.0.0",
+    "@fastify/jwt": "^9.0.4",
+    "@fastify/multipart": "^10.1.0",
+    "@fastify/static": "^10.1.3",
+    "@google/generative-ai": "^0.24.0",
+    "@prisma/client": "^6.5.0",
+    "bcryptjs": "^3.0.2",
+    "docx": "^9.16.0",
+    "dotenv": "^16.4.7",
+    "fastify": "^5.2.1",
+    "ioredis": "^6.0.0",
+    "nodemailer": "^10.6.0",
+    "puppeteer": "^24.4.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/node": "^22.13.10",
+    "@types/nodemailer": "^8.0.2",
+    "prisma": "^6.5.0",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  }
+}
