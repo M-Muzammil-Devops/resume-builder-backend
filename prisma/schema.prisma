@@ -27,6 +27,8 @@ model User {
   autoApplyCredits AutoApplyCredit?
   loginEvents      LoginEvent[]
   authTokens       AuthToken[]
+  exportEvents     ExportEvent[]
+  oauthAccounts    OAuthAccount[]
 
   @@index([role])
   @@index([country])
@@ -48,19 +50,128 @@ model AuthToken {
   @@index([expiresAt])
 }
 
+/** SSO link: one row per provider identity (Google sub / Facebook id), linked by verified email. */
+model OAuthAccount {
+  id             String   @id @default(cuid())
+  provider       String
+  providerUserId String
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  email          String?
+  createdAt      DateTime @default(now())
+  lastUsedAt     DateTime @default(now())
+
+  @@unique([provider, providerUserId])
+  @@index([userId])
+}
+
 model LoginEvent {
-  id        String   @id @default(cuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  ip        String?
-  country   String?
-  city      String?
-  userAgent String?
-  createdAt DateTime @default(now())
+  id          String    @id @default(cuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ip          String?
+  country     String?
+  city        String?
+  userAgent   String?
+  /// Filled offline from ip / userAgent (src/lib/activity.ts); null until enriched.
+  region      String?
+  countryCode String?
+  browser     String?
+  os          String?
+  /// desktop | mobile | tablet | bot | unknown
+  device      String?
+  enrichedAt  DateTime?
+  createdAt   DateTime  @default(now())
 
   @@index([userId])
   @@index([createdAt])
   @@index([country])
+  @@index([device])
+  @@index([enrichedAt])
+}
+
+/// Cookie-consent audit trail: one row per choice saved in the banner or the preferences modal.
+model ConsentLog {
+  id          String   @id @default(cuid())
+  anonId      String
+  userId      String?
+  version     Int
+  preferences Boolean  @default(false)
+  analytics   Boolean  @default(false)
+  marketing   Boolean  @default(false)
+  /// accept_all | reject_all | custom
+  action      String
+  createdAt   DateTime @default(now())
+
+  @@index([anonId])
+  @@index([createdAt])
+}
+
+/// Page views, recorded only when the visitor's consent cookie allows analytics. No IP is stored.
+model PageView {
+  id        String   @id @default(cuid())
+  anonId    String
+  userId    String?
+  path      String
+  referrer  String?
+  device    String?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([path])
+  @@index([userId])
+}
+
+/// Admin overrides for the built-in landing templates (frontend src/lib/landingTemplates.ts).
+model TemplateSetting {
+  id          String   @id
+  name        String?
+  category    String?
+  description String?
+  isActive    Boolean  @default(true)
+  featured    Boolean  @default(false)
+  sortOrder   Int      @default(0)
+  updatedAt   DateTime @updatedAt
+}
+
+/// One row per successful resume export (PDF/DOCX/TXT); drives usage counts and plan limits.
+model ExportEvent {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  resumeId   String?
+  templateId String?
+  format     String
+  pageSize   String?
+  createdAt  DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([resumeId])
+  @@index([createdAt])
+}
+
+/// Key/value admin settings (e.g. "export" = PDF export settings).
+model AppSetting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+}
+
+/// Every admin write action (template, resume, settings changes).
+model AdminAuditLog {
+  id         String   @id @default(cuid())
+  adminId    String
+  adminEmail String
+  action     String
+  targetType String
+  targetId   String?
+  details    Json?
+  ip         String?
+  createdAt  DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([adminId])
+  @@index([targetType, targetId])
 }
 
 model Resume {

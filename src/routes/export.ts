@@ -20,6 +20,9 @@ import {
   parseExportFormat,
   type ExportFormat,
 } from "../lib/exportFormats";
+import { adminGuard, adminOf } from "../lib/adminAuth";
+import { auditAdmin } from "../lib/adminAudit";
+import { exportLimitFor, getExportSettings, startOfUtcMonth, type ExportSettings } from "../lib/exportSettings";
 
 function fontBase64(fileName: string): string | null {
   const bundled = path.resolve(process.cwd(), "../frontend/public/fonts", fileName);
@@ -634,8 +637,55 @@ function safeFileName(raw: string, fallback: string) {
   return cleaned || fallback;
 }
 
-function pageSizeOf(design: unknown): "A4" | "US Letter" {
-  return normalizePageSize((design as { pageSize?: string } | null)?.pageSize);
+function pageSizeOf(design: unknown, fallback?: "A4" | "US Letter"): "A4" | "US Letter" {
+  const own = (design as { pageSize?: string } | null)?.pageSize;
+  // Admin "default page size" applies only to resumes that never picked one.
+  if (!own && fallback) return fallback;
+  return normalizePageSize(own);
+}
+
+/** PDF options decided by the admin export settings (watermark for free accounts, extra margin). */
+export type PdfExtras = {
+  watermark: string | null;
+  marginMm: number;
+  /** Runs after the PDF rendered and before it is sent (usage counting; keeps the monthly cap exact). */
+  onRendered?: () => Promise<void>;
+};
+
+export function pdfExtrasFor(settings: ExportSettings, role: string | null | undefined): PdfExtras {
+  return {
+    watermark: settings.watermarkFree && role !== "admin" && role !== "pro" ? settings.watermarkText : null,
+    marginMm: settings.marginMm,
+  };
+}
+
+/** Scale that keeps a full-width page inside an extra outer margin. */
+export function marginScale(pageSize: "A4" | "US Letter", marginMm: number): number {
+  if (!marginMm) return 1;
+  const widthMm = pageSize === "US Letter" ? 215.9 : 210;
+  return Math.max(0.1, Math.min(1, (widthMm - 2 * marginMm) / widthMm));
+}
+
+/** Monthly PDF export cap per plan (admin settings). Returns an error message when it is reached. */
+async function exportLimitError(user: { userId: string; role?: string }, settings: ExportSettings): Promise<string | null> {
+  const limit = exportLimitFor(settings, user.role);
+  if (!limit) return null;
+  try {
+    const used = await prisma.exportEvent.count({
+      where: { userId: user.userId, format: "pdf", createdAt: { gte: startOfUtcMonth() } },
+    });
+    return used >= limit ? `You have reached this month's limit of ${limit} PDF downloads on your plan.` : null;
+  } catch {
+    return null;
+  }
+}
+
+async function recordExport(data: { userId: string; resumeId: string; templateId?: string | null; format: string; pageSize?: string | null }) {
+  try {
+    await prisma.exportEvent.create({ data });
+  } catch {
+    // Usage stats must never break a download.
+  }
 }
 
 export async function exportRoutes(app: FastifyInstance) {
@@ -647,7 +697,9 @@ export async function exportRoutes(app: FastifyInstance) {
     },
     resumeId: string,
     pageSize: "A4" | "US Letter",
-    baseName: string
+    baseName: string,
+    extras: PdfExtras = { watermark: null, marginMm: 0 },
+    disposition: "attachment" | "inline" = "attachment"
   ) {
     try {
       const puppeteer = await import("puppeteer");
@@ -816,19 +868,44 @@ export async function exportRoutes(app: FastifyInstance) {
           originOf(env.printBaseUrl),
           originOf(env.appUrl || env.frontendUrl)
         );
+        if (extras.marginMm > 0) {
+          // Constructed stylesheet (CSSOM): allowed by the page's nonce CSP, unlike an injected <style>.
+          // page.pdf() scales the page down by marginScale() so the full-width sheet fits inside it.
+          await page.evaluate((mm: number) => {
+            const sheet = new CSSStyleSheet();
+            sheet.replaceSync(`@page { margin: ${mm}mm !important; }`);
+            document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+          }, extras.marginMm);
+        }
+        if (extras.watermark) {
+          // position:fixed repeats on every printed page. textContent only: never parsed as HTML.
+          await page.evaluate((text: string) => {
+            const mark = document.createElement("div");
+            mark.setAttribute("data-rb-watermark", "");
+            mark.textContent = text;
+            mark.style.cssText =
+              "position:fixed;left:0;right:0;bottom:4mm;text-align:center;font:600 9px/1.2 Arial,sans-serif;" +
+              "letter-spacing:.08em;color:rgba(100,116,139,.7);z-index:2147483647;pointer-events:none;" +
+              // The print CSS hides everything outside .resume-page (body * { visibility: hidden }).
+              "visibility:visible !important";
+            document.body.appendChild(mark);
+          }, extras.watermark);
+        }
         const pdf = await page.pdf({
           printBackground: true,
           preferCSSPageSize: true,
+          scale: marginScale(pageSize, extras.marginMm),
           width: pageSize === "US Letter" ? "8.5in" : "210mm",
           height: pageSize === "US Letter" ? "11in" : "297mm",
           // Margins are drawn by the print view (repeated per page), so the paper colour is full-bleed.
           margin: { top: "0", right: "0", bottom: "0", left: "0" },
         });
+        await extras.onRendered?.();
         return reply
           .header("Content-Type", "application/pdf")
           .header(
             "Content-Disposition",
-            `attachment; filename="${baseName}.pdf"; filename*=UTF-8''${encodeURIComponent(baseName)}.pdf`
+            `${disposition}; filename="${baseName}.pdf"; filename*=UTF-8''${encodeURIComponent(baseName)}.pdf`
           )
           .send(Buffer.from(pdf));
       } finally {
@@ -881,9 +958,16 @@ export async function exportRoutes(app: FastifyInstance) {
 
     const baseName = safeFileName(query.filename || row.title, "Resume");
     const html = resumeToHtml(scrubSampleText(row.content), row.design, row.title, row.layoutKey);
+    const settings = await getExportSettings();
 
     if (format === "pdf") {
-      return buildPdfReply(reply, request, row.id, pageSizeOf(row.design), baseName);
+      const limitError = await exportLimitError(request.user, settings);
+      if (limitError) return reply.code(429).send({ error: limitError, code: "EXPORT_LIMIT" });
+      const pageSize = pageSizeOf(row.design, settings.defaultPageSize);
+      return buildPdfReply(reply, request, row.id, pageSize, baseName, {
+        ...pdfExtrasFor(settings, request.user.role),
+        onRendered: () => recordExport({ userId: request.user.userId, resumeId: row.id, templateId: row.templateId, format, pageSize }),
+      });
     }
 
     if (format === "html") {
@@ -893,6 +977,7 @@ export async function exportRoutes(app: FastifyInstance) {
         .send(html);
     }
 
+    await recordExport({ userId: request.user.userId, resumeId: row.id, templateId: row.templateId, format, pageSize: pageSizeOf(row.design, settings.defaultPageSize) });
     return buildTextReply(reply, format, html, row.design, baseName);
   });
 
@@ -917,9 +1002,14 @@ export async function exportRoutes(app: FastifyInstance) {
 
     const row = await prisma.resume.findFirst({
       where: { id, userId: request.user.userId },
-      select: { id: true, title: true, content: true, design: true, layoutKey: true },
+      select: { id: true, title: true, content: true, design: true, layoutKey: true, templateId: true },
     });
     if (!row) return reply.code(404).send({ error: "Not found" });
+    const settings = await getExportSettings();
+    if (format === "pdf") {
+      const limitError = await exportLimitError(request.user, settings);
+      if (limitError) return reply.code(429).send({ error: limitError, code: "EXPORT_LIMIT" });
+    }
 
     // BUG-402: the live payload goes through the same sanitiser as PUT /resumes/:id
     // before it is stored or rendered. A body without content exports the saved resume.
@@ -941,8 +1031,45 @@ export async function exportRoutes(app: FastifyInstance) {
       });
     }
 
-    if (format !== "pdf") return buildTextReply(reply, format, html, design, baseName);
-    return buildPdfReply(reply, request, id, pageSizeOf(design), baseName);
+    const pageSize = pageSizeOf(design, settings.defaultPageSize);
+    if (format !== "pdf") {
+      await recordExport({ userId: request.user.userId, resumeId: id, templateId: row.templateId, format, pageSize });
+      return buildTextReply(reply, format, html, design, baseName);
+    }
+    return buildPdfReply(reply, request, id, pageSize, baseName, {
+      ...pdfExtrasFor(settings, request.user.role),
+      onRendered: () => recordExport({ userId: request.user.userId, resumeId: id, templateId: row.templateId, format, pageSize }),
+    });
+  });
+
+  /**
+   * Admin: view / download any user's resume as PDF. The print page is rendered with a
+   * 2-minute token of the resume OWNER (the print view only loads its owner's resume);
+   * that token never leaves the server. No watermark, no limit, not counted as a user export.
+   */
+  app.get("/admin/resumes/:id/pdf", { onRequest: adminGuard(app) }, async (request, reply) => {
+    const { id } = z.object({ id: z.string().min(1).max(64) }).parse(request.params);
+    const { inline } = z.object({ inline: z.enum(["0", "1"]).optional() }).parse(request.query);
+    const row = await prisma.resume.findUnique({
+      where: { id },
+      select: { id: true, title: true, design: true, user: { select: { id: true, email: true, role: true, sessionEpoch: true } } },
+    });
+    if (!row) return reply.code(404).send({ error: "Resume not found" });
+    const settings = await getExportSettings();
+    const owner = { userId: row.user.id, email: row.user.email, role: row.user.role, epoch: row.user.sessionEpoch };
+    await auditAdmin(request, inline === "1" ? "resume.view" : "resume.download", "resume", id, {
+      ownerId: row.user.id,
+      admin: adminOf(request).email,
+    });
+    return buildPdfReply(
+      reply,
+      { user: owner, log: request.log },
+      row.id,
+      pageSizeOf(row.design, settings.defaultPageSize),
+      safeFileName(row.title, "Resume"),
+      { watermark: null, marginMm: settings.marginMm },
+      inline === "1" ? "inline" : "attachment"
+    );
   });
 
   app.post("/export/preview", async (request) => {

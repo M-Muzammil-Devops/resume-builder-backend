@@ -78,58 +78,70 @@ async function main() {
     createdJobs.push(await prisma.job.create({ data: j }));
   }
 
-  const email = "demo@resume.local";
-  const passwordHash = await bcrypt.hash("demo1234", 10);
-  const user = await prisma.user.upsert({
-    where: { email },
-    create: {
-      email,
-      passwordHash,
-      name: "Demo User",
-      autoApplyCredits: { create: { remaining: 50, processing: 0, applied: 0 } },
-      autoApplyConfig: {
-        create: {
-          roles: ["DevOps Engineer", "SRE", "Platform Engineer"],
-          locations: ["Remote", "Pakistan"],
-          remote: true,
+  // Demo user is OFF by default; enable only for local development with SEED_DEMO_USER=true + DEMO_PASSWORD.
+  if (String(process.env.SEED_DEMO_USER || "false").toLowerCase() === "true") {
+    const demoPassword = process.env.DEMO_PASSWORD || "";
+    if (demoPassword.length < 8) throw new Error("SEED_DEMO_USER=true needs DEMO_PASSWORD (min 8 characters)");
+    const email = "demo@resume.local";
+    const passwordHash = await bcrypt.hash(demoPassword, 10);
+    const user = await prisma.user.upsert({
+      where: { email },
+      create: {
+        email,
+        passwordHash,
+        name: "Demo User",
+        autoApplyCredits: { create: { remaining: 50, processing: 0, applied: 0 } },
+        autoApplyConfig: {
+          create: {
+            roles: ["DevOps Engineer", "SRE", "Platform Engineer"],
+            locations: ["Remote", "Pakistan"],
+            remote: true,
+          },
         },
       },
-    },
-    update: { passwordHash, name: "Demo User" },
-  });
-
-  const sample = createSampleDevopsResume();
-  const existingResume = await prisma.resume.findFirst({ where: { userId: user.id } });
-  if (!existingResume) {
-    await prisma.resume.create({
-      data: {
-        userId: user.id,
-        title: sample.title,
-        templateId: sample.templateId,
-        layoutKey: sample.layoutKey,
-        content: sample.content as object,
-        design: sample.design as object,
-      },
+      update: { passwordHash, name: "Demo User" },
     });
-  }
 
-  await prisma.jobApplication.deleteMany({ where: { userId: user.id } });
-  const stages = ["recommended", "shortlist", "auto_apply", "applied", "interview"] as const;
-  for (let i = 0; i < createdJobs.length; i++) {
-    await prisma.jobApplication.create({
-      data: {
-        userId: user.id,
-        jobId: createdJobs[i].id,
-        stage: stages[i % stages.length],
-      },
-    });
+    const sample = createSampleDevopsResume();
+    const existingResume = await prisma.resume.findFirst({ where: { userId: user.id } });
+    if (!existingResume) {
+      await prisma.resume.create({
+        data: {
+          userId: user.id,
+          title: sample.title,
+          templateId: sample.templateId,
+          layoutKey: sample.layoutKey,
+          content: sample.content as object,
+          design: sample.design as object,
+        },
+      });
+    }
+
+    await prisma.jobApplication.deleteMany({ where: { userId: user.id } });
+    const stages = ["recommended", "shortlist", "auto_apply", "applied", "interview"] as const;
+    for (let i = 0; i < createdJobs.length; i++) {
+      await prisma.jobApplication.create({
+        data: {
+          userId: user.id,
+          jobId: createdJobs[i].id,
+          stage: stages[i % stages.length],
+        },
+      });
+    }
+  } else {
+    console.log("Demo user skipped (SEED_DEMO_USER is not true)");
   }
 
   console.log(`Seeded ${TEMPLATES.length} templates, ${createdJobs.length} jobs`);
-  console.log(`Demo login: ${email} / demo1234`);
 
   const adminEmail = process.env.ADMIN_EMAIL || "linux00011@gmail.com";
-  const adminPassword = process.env.ADMIN_PASSWORD || "admin@123";
+  const adminPassword = process.env.ADMIN_PASSWORD || "";
+  if (!adminPassword) {
+    throw new Error("ADMIN_PASSWORD is required (set it in .env). Refusing to seed an admin without one.");
+  }
+  if (adminPassword.length < 12) {
+    throw new Error("ADMIN_PASSWORD must be at least 12 characters.");
+  }
   const adminHash = await bcrypt.hash(adminPassword, 10);
   await prisma.user.upsert({
     where: { email: adminEmail },

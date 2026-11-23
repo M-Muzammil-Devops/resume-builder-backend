@@ -35,12 +35,12 @@ bash deploy/deploy.sh --domain cv.example.com --email you@example.com --admin-em
 ```
 Run it as `ubuntu` (it uses sudo where needed). It:
 1. installs Docker + compose if missing, adds a swapfile on small instances, opens 80/443 in UFW if UFW is on;
-2. creates `deploy/.env` from `.env.example` with random secrets (never printed) and starts postgres + redis;
+2. creates `.env` from `.env.example` with random secrets (never printed) and starts postgres + redis;
 3. installs the backend host deps: Node 22 (NodeSource), ffmpeg, git, openssl, fonts, Google Chrome
    (Chromium snap on arm64) for PDF export, and `audio-worker/.venv` (uv, Python 3.11, CPU torch 2.1.2,
    DeepFilterNet 0.5.6, model prefetched to `~/.cache/DeepFilterNet`);
-4. writes `deploy/backend.env` (the unit's EnvironmentFile, chmod 600) from `deploy/.env`;
-5. `npm ci`, `prisma generate`, `prisma migrate deploy` + non-destructive `prisma db push`, the seed
+4. writes `.env` (the unit's EnvironmentFile, chmod 600) from `.env`;
+5. `npm ci`, `prisma generate`, `prisma migrate deploy`, the seed
    (first run only), marks the admin e-mail verified, `npm run build`;
 6. installs/enables `/etc/systemd/system/resume-builder-backend.service`, restarts it, waits for `/health`;
 7. builds and starts the frontend container; writes the nginx site, `nginx -t` (rolls back on failure),
@@ -56,7 +56,7 @@ bash deploy/update.sh          # = bash deploy/deploy.sh --pull
 - `git pull --ff-only` in both repos (as ubuntu).
 - backend: `npm ci` only if `package.json`/`package-lock.json` changed; `prisma generate` + migrate + db push
   only if `prisma/` changed; then `npm run build` and `systemctl restart resume-builder-backend`.
-  Changes to `deploy/.env` are picked up too (backend.env rewritten, service restarted).
+  Changes to `.env` are picked up too (backend.env rewritten, service restarted).
 - frontend: image rebuilt and container restarted only if the frontend repo changed.
 - prints what was updated and the time taken. "Changed" is measured against the last revision that was
   deployed (`deploy/.state/`), so a manual `git pull` followed by `update.sh` works the same.
@@ -71,8 +71,8 @@ bash deploy/deploy.sh --down           # stop the service + containers (data kep
 bash deploy/deploy.sh --seed           # re-run the seed (resets sample jobs + demo user!)
 sudo systemctl status resume-builder-backend
 ```
-Settings (Gemini key, SMTP, audio limits, ports): edit `deploy/.env`, then `bash deploy/update.sh`.
-Admin login: `ADMIN_EMAIL` / `ADMIN_PASSWORD` in `deploy/.env`.
+Settings (Gemini key, SMTP, audio limits, ports): edit `.env`, then `bash deploy/update.sh`.
+Admin login: `ADMIN_EMAIL` / `ADMIN_PASSWORD` in `.env`.
 
 ## Backups
 ```bash
@@ -83,12 +83,12 @@ Uploads live in `/home/ubuntu/resume-builder-data/uploads`.
 ## Notes
 - The API code listens on `0.0.0.0`; the unit preloads `deploy/host/listen-loopback.cjs`, which binds it to
   `127.0.0.1` instead (no code change). Only nginx can reach it.
-- Migrations: `prisma migrate deploy`, then (while `PRISMA_SYNC_SCHEMA=true`) a non-destructive
-  `prisma db push`, because `prisma/migrations` does not yet contain every table/column in `schema.prisma`.
+- Migrations: `prisma migrate deploy` only (`prisma/migrations` now covers the whole schema; `db push` is no longer used).
+- Admin: `ADMIN_PASSWORD` is required (min 12 chars, no default). The demo user/endpoint is off unless `SEED_DEMO_USER=true` + `DEMO_PASSWORD`.
 - The seeded admin has no verified e-mail and login requires one, so deploy.sh marks only `ADMIN_EMAIL` verified.
 - CSP `upgrade-insecure-requests`: over plain HTTP nginx drops only that directive; over HTTPS it passes.
 - PDF export: Chrome on the host opens `http://127.0.0.1:${FRONTEND_PORT}/print/:id` (loopback, so the CSP
   is fine). Fonts come from `/home/ubuntu/frontend/public/fonts`, a symlink deploy.sh creates to the frontend repo.
 - The seed also creates a demo account with a well-known password (`prisma/seed.ts`); change or remove it
   on a public server.
-- `deploy/.env`, `deploy/backend.env`, `deploy/.seeded`, `deploy/.state/` are git-ignored. Never commit them.
+- `.env`, `.env`, `deploy/.seeded`, `deploy/.state/` are git-ignored. Never commit them.

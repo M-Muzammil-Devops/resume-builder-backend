@@ -31,7 +31,6 @@ test("BUG-1340/1343: strength → DFN attenuation cap is 6-18 dB, graded, monoto
   // Noticeably graded: 20 / 50 / 80 differ by >= 3 dB each (QA: 50 and 80 sounded the same, 20 cut 26 dB).
   assert.ok(dfAttenLimit(50) - dfAttenLimit(20) >= 3);
   assert.ok(dfAttenLimit(80) - dfAttenLimit(50) >= 3);
-  assert.equal(dfAttenLimit(80, "voice"), 15);
 });
 
 test("BUG-1340: Keep all voices (conversation) = 8-12 dB cap + 10 % dry; gentle strengths blend a little dry", () => {

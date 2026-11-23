@@ -10,10 +10,9 @@ import {
   dfAttenLimit,
   encodeArgs,
   fallbackFilter,
-  loudnormPass2,
   outputFor,
-  parseLoudnorm,
   parseMetrics,
+  parseMode,
   parseProbe,
   parseRange,
   peaksFromPcm,
@@ -133,12 +132,12 @@ test("audio ffmpeg args: arrays only, protocol whitelist, server paths only", ()
   assert.ok(encodeArgs("a", "b", outputFor("same", "amr_nb", "amr", ALL), 2).join(" ").includes("-ac 1"));
 });
 
-test("audio loudnorm two-pass + metrics parsing", () => {
-  const stderr = `[Parsed_loudnorm_6 @ 0x1]\n{\n\t"input_i" : "-27.31",\n\t"input_tp" : "-6.20",\n\t"input_lra" : "5.10",\n\t"input_thresh" : "-37.80",\n\t"output_i" : "-16.00",\n\t"target_offset" : "0.12"\n}\n`;
-  const m = parseLoudnorm(stderr);
-  assert.ok(m);
-  assert.match(loudnormPass2(m!), /measured_I=-27.31:measured_TP=-6.2:measured_LRA=5.1:measured_thresh=-37.8:offset=0.12:linear=true/);
-  assert.equal(parseLoudnorm("nothing here"), null);
+test("audio metrics parsing + mode fallback", () => {
+  // The retired "voice" (Voice clean) mode and unknown values fall back to plain noise removal.
+  assert.equal(parseMode("conversation"), "conversation");
+  assert.equal(parseMode("noise"), "noise");
+  assert.equal(parseMode("voice"), "noise");
+  assert.equal(parseMode(undefined), "noise");
   const met = parseMetrics("[Parsed_astats_0] Overall\nNoise floor dB: -48.123\n[Parsed_ebur128_1] Summary:\n  Integrated loudness:\n    I:         -16.2 LUFS\n");
   assert.deepEqual(met, { noiseFloorDb: -48.1, lufs: -16.2 });
   assert.deepEqual(parseMetrics("Noise floor dB: -inf\n I: -70.0 LUFS"), { noiseFloorDb: null, lufs: null });

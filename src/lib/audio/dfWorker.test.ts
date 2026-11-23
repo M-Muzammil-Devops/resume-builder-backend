@@ -38,3 +38,19 @@ test("round23 chunk size ~60 s with a short crossfade overlap", () => {
   assert.equal(CHUNK_SECONDS, 60);
   assert.ok(OVERLAP_SECONDS > 0 && OVERLAP_SECONDS <= 1);
 });
+
+test("idle worker stops after idleMs, restarts lazily on the next job", async () => {
+  const w = new DeepFilterWorker(process.execPath, FAKE, "cpu", log, [], 300);
+  try {
+    assert.equal(w.status(), "idle");
+    const r1 = await w.denoise("i1", "1:10", "out.wav", null, 2000);
+    assert.equal(r1.ok, true);
+    assert.equal(w.status(), "ready");
+    await new Promise((r) => setTimeout(r, 700));
+    assert.equal(w.status(), "idle"); // stopped, memory freed
+    const r2 = await w.denoise("i2", "1:10", "out.wav", null, 2000);
+    assert.equal(r2.ok, true); // lazy restart
+  } finally {
+    w.stop();
+  }
+});

@@ -5,6 +5,9 @@ type RedisLike = {
   set(key: string, value: string, mode?: string, ttl?: number): Promise<unknown>;
   del(...keys: string[]): Promise<unknown>;
   scan?(cursor: string, ...args: (string | number)[]): Promise<[string, string[]]>;
+  incr?(key: string): Promise<number>;
+  expire?(key: string, seconds: number): Promise<unknown>;
+  getdel?(key: string): Promise<string | null>;
   quit(): Promise<unknown>;
 };
 
@@ -101,6 +104,35 @@ export async function cacheKeys(prefix: string, max = 5000): Promise<string[]> {
     /* ignore */
   }
   return [...new Set(out)];
+}
+
+/** Atomic counter with a TTL set on first use. null when Redis is off or fails (caller falls back). */
+export async function cacheIncr(key: string, ttl: number): Promise<number | null> {
+  if (!client?.incr) return null;
+  try {
+    const value = await client.incr(key);
+    if (value === 1 && client.expire) await client.expire(key, ttl);
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+/** Read a JSON value and delete it in one step (GETDEL; GET + DEL on old servers). One-time tokens. */
+export async function cacheTake<T>(key: string): Promise<T | null> {
+  if (!client) return null;
+  try {
+    let raw: string | null;
+    if (client.getdel) {
+      raw = await client.getdel(key);
+    } else {
+      raw = await client.get(key);
+      if (raw) await client.del(key);
+    }
+    return raw ? (JSON.parse(raw) as T) : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Test hook: inject a fake client. */

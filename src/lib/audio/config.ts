@@ -33,6 +33,7 @@ export type AudioConfig = {
   minFreeBytes: number;
   /** A job still not finished this long after it started is stale: stopped, failed, lock released. */
   maxJobMs: number;
+  workerIdleMs: number;
 };
 
 /** Audio tool settings. Every knob comes from env (names in README); paths never come from user input. */
@@ -56,6 +57,8 @@ export function loadAudioConfig(e: NodeJS.ProcessEnv = process.env): AudioConfig
     ttlMs: num(e.AUDIO_TTL_MINUTES, 60) * 60_000,
     maxQueue: num(e.AUDIO_MAX_QUEUE, 20),
     minFreeBytes: num(e.AUDIO_MIN_FREE_MB, 2048) * 1024 * 1024,
+    // AUDIO_WORKER_IDLE_MIN: stop the python worker after this many idle minutes (default 10, 0 = never).
+    workerIdleMs: Math.max(0, num(e.AUDIO_WORKER_IDLE_MIN, 10)) * 60_000,
     maxJobMs: num(e.AUDIO_MAX_JOB_MINUTES, 30) * 60_000,
   };
 }

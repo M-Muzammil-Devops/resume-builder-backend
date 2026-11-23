@@ -5,7 +5,7 @@ import { pipeline } from "node:stream/promises";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { AudioError, type AudioJob, type AudioService } from "../lib/audio/service";
 import { makePreviewSigner, PREVIEW_TTL_SECONDS, type PreviewTrack } from "../lib/audio/previewToken";
-import { BLOCKED_EXTENSIONS, cleanUploadName, contentDisposition, extOf, parseRange, parseStrength, type Mode, type OutputChoice } from "../lib/audio/media";
+import { BLOCKED_EXTENSIONS, cleanUploadName, contentDisposition, extOf, parseMode, parseRange, parseStrength, type Mode, type OutputChoice } from "../lib/audio/media";
 
 /** The subset of AudioService the routes use (tests pass a fake). */
 export type AudioBackend = Pick<
@@ -202,7 +202,8 @@ export async function audioRoutes(app: FastifyInstance, opts: { service: AudioBa
       throw err;
     }
 
-    const mode: Mode = fields.mode === "voice" ? "voice" : fields.mode === "conversation" ? "conversation" : "noise";
+    // Retired "voice" (Voice clean) and unknown values fall back to plain noise removal (old clients keep working).
+    const mode: Mode = parseMode(fields.mode);
     const output: OutputChoice = ["mp3", "wav", "flac"].includes(fields.output) ? (fields.output as OutputChoice) : "same";
     const strength = parseStrength(fields.strength, 80);
     if (strength === null) {

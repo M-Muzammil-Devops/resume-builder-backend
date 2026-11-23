@@ -130,14 +130,23 @@ test("audio routes: sign-in required on every route", async () => {
   await app.close();
 });
 
+test("audio denoise: retired mode=voice (Voice clean) falls back to plain noise removal", async () => {
+  const { app } = await makeApp();
+  const res = await upload(app, "u-voice", { name: "old-client.mp3", data: MP3 }, { mode: "voice", strength: "80", output: "mp3" });
+  assert.equal(res.statusCode, 202, res.body);
+  assert.equal(res.json().job.mode, "noise");
+  await app.inject({ method: "DELETE", url: `/audio/jobs/${res.json().jobId}`, headers: { "x-test-user": "u-voice" } });
+  await app.close();
+});
+
 test("audio denoise: 202 + jobId, fields parsed and clamped, status for owner, 404 for others", async () => {
   const { app } = await makeApp();
-  const res = await upload(app, "u1", { name: "talk.mp3", data: MP3 }, { mode: "voice", strength: "100", output: "flac" });
+  const res = await upload(app, "u1", { name: "talk.mp3", data: MP3 }, { mode: "conversation", strength: "100", output: "flac" });
   assert.equal(res.statusCode, 202, res.body);
   const body = res.json();
   assert.match(body.jobId, /^[0-9a-f-]{36}$/);
   assert.equal(body.status, "queued");
-  assert.equal(body.job.mode, "voice");
+  assert.equal(body.job.mode, "conversation");
   assert.equal(body.job.strength, 100);
   assert.equal(body.job.output, "flac");
   const own = await app.inject({ method: "GET", url: `/audio/jobs/${body.jobId}`, headers: { "x-test-user": "u1" } });

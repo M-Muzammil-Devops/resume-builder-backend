@@ -25,7 +25,7 @@
 #   bash deploy/deploy.sh --down                          # stop everything (data volumes are kept)
 #
 # Safe to re-run (idempotent): secrets, data, certificates and other nginx sites are kept.
-# Secrets live only in deploy/.env and deploy/backend.env (chmod 600) and are never printed.
+# Secrets live only in <backend>/.env (chmod 600) and are never printed.
 # =============================================================================
 set -euo pipefail
 IFS=$'\n\t'
@@ -34,9 +34,9 @@ IFS=$'\n\t'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_DIR="$SCRIPT_DIR"
 COMPOSE_FILE="$DEPLOY_DIR/docker-compose.prod.yml"
-ENV_FILE="$DEPLOY_DIR/.env"
-ENV_EXAMPLE="$DEPLOY_DIR/.env.example"
-BACKEND_ENV="$DEPLOY_DIR/backend.env"          # systemd EnvironmentFile of the backend (generated)
+ENV_FILE="$(dirname "$DEPLOY_DIR")/.env"        # single env file (backend root): systemd, compose --env-file, deploy.sh
+ENV_EXAMPLE="$(dirname "$DEPLOY_DIR")/.env.example"
+BACKEND_ENV="$ENV_FILE"                        # same file as ENV_FILE
 STATE_DIR="$DEPLOY_DIR/.state"                 # last deployed git revisions (for --pull)
 SEED_MARKER="$DEPLOY_DIR/.seeded"
 PROJECT_NAME="resume-builder"
@@ -88,7 +88,7 @@ Options:
   --restart            restart the backend service and the frontend container
   --nginx-only         only (re)write the nginx site and certificate
   --no-cache           build the frontend image without the Docker layer cache
-  --seed               run the database seed again (resets sample jobs + demo user)
+  --seed               run the database seed again (resets sample jobs; demo user only when SEED_DEMO_USER=true)
   --logs [SERVICE]     follow logs (backend = journalctl; frontend|postgres|redis = docker)
   --down               stop the backend service and the containers (data volumes are kept)
   -h, --help           show this help
@@ -170,7 +170,7 @@ as_app() {
 app_run() { local dir="$1"; shift; as_app bash "$DEPLOY_DIR/host/with-env.sh" "$BACKEND_ENV" "$dir" "$@"; }
 
 # ---------- env file helpers (values never echoed) ----------
-get_env() { # get_env KEY -> value from deploy/.env (empty if missing)
+get_env() { # get_env KEY -> value from .env (empty if missing)
   [[ -f "$ENV_FILE" ]] || return 0
   # (a trailing CR from a file edited on Windows is ignored)
   K="$1" awk '{ sub(/\r$/, "") } index($0, ENVIRON["K"] "=") == 1 { print substr($0, length(ENVIRON["K"]) + 2); exit }' "$ENV_FILE"
@@ -280,7 +280,7 @@ configure_ufw() {
   # On EC2 also open 80/443 (and 22) in the instance Security Group. 3000/4000/5432/6379 stay on 127.0.0.1.
 }
 
-# ---------- 4. deploy/.env with generated secrets ----------
+# ---------- 4. .env with generated secrets ----------
 public_ip() {
   local token ip=""
   # EC2 instance metadata (IMDSv2), then a public echo service.
@@ -300,7 +300,7 @@ prepare_env() {
   if [[ ! -f "$ENV_FILE" ]]; then
     [[ -f "$ENV_EXAMPLE" ]] || die "$ENV_EXAMPLE missing"
     cp "$ENV_EXAMPLE" "$ENV_FILE"
-    log "created deploy/.env from .env.example"
+    log "created .env from .env.example"
   fi
   chmod 600 "$ENV_FILE"
   [[ "$(stat -c %U "$ENV_FILE")" == "$APP_USER" ]] || run_root chown "$APP_USER:$APP_GROUP" "$ENV_FILE"
@@ -333,13 +333,13 @@ prepare_env() {
     app_url="$(get_env APP_URL)"
     if [[ -z "$app_url" ]]; then
       local ip; ip="$(public_ip)"
-      [[ -n "$ip" ]] || die "could not detect the public IP; set APP_URL in deploy/.env"
+      [[ -n "$ip" ]] || die "could not detect the public IP; set APP_URL in .env"
       app_url="http://$ip"
     fi
   fi
   set_env APP_URL "$app_url"
 
-  [[ "$(get_env ADMIN_EMAIL)" == "admin@example.com" ]] && warn "ADMIN_EMAIL is still admin@example.com (use --admin-email or edit deploy/.env)"
+  [[ "$(get_env ADMIN_EMAIL)" == "admin@example.com" ]] && warn "ADMIN_EMAIL is still admin@example.com (use --admin-email or edit .env)"
   log "APP_URL=$(get_env APP_URL)"
 }
 
@@ -441,6 +441,27 @@ configure_host_nginx() {
   run_root sh -c "ls -1t '$NGINX_AVAILABLE'.bak-* 2>/dev/null | tail -n +6 | xargs -r rm -f"
 }
 
+# ---------- 5b. HTTP/2 + brotli (idempotent, safe to re-run) ----------
+enable_http2() {
+  [[ -f "$NGINX_AVAILABLE" ]] || return 0
+  if run_root grep -Eq 'listen (\[::\]:)?443 ssl;' "$NGINX_AVAILABLE"; then
+    run_root sed -i -E 's/listen (\[::\]:)?443 ssl;/listen \1443 ssl http2;/' "$NGINX_AVAILABLE"
+    if run_root nginx -t >/dev/null 2>&1; then reload_nginx; log "HTTP/2 enabled on 443"
+    else warn "nginx -t failed after enabling HTTP/2; reverting"; run_root sed -i -E 's/ssl http2;/ssl;/' "$NGINX_AVAILABLE"; fi
+  fi
+}
+
+enable_compression() {
+  local conf="$NGINX_DIR/conf.d/rb-brotli.conf"
+  if ! run_root test -f /usr/lib/nginx/modules/ngx_http_brotli_filter_module.so; then
+    apt-cache show libnginx-mod-http-brotli-filter >/dev/null 2>&1 || { warn "brotli module not in apt; gzip only"; return 0; }
+    apt_install libnginx-mod-http-brotli-filter libnginx-mod-http-brotli-static
+  fi
+  run_root install -m 0644 "$DEPLOY_DIR/nginx/rb-brotli.conf" "$conf"
+  if run_root nginx -t >/dev/null 2>&1; then reload_nginx; log "brotli enabled"
+  else warn "nginx -t failed with brotli; removing it"; run_root rm -f "$conf"; fi
+}
+
 # ---------- 6. TLS (host certbot, nginx plugin) ----------
 setup_tls() {
   local domain email
@@ -464,6 +485,7 @@ setup_tls() {
     warn "certbot failed; site stays on HTTP. Check DNS and that port 80 is open in the Security Group, then re-run."
     return 0
   fi
+  enable_http2
   systemctl list-timers --all 2>/dev/null | grep -q certbot || warn "certbot.timer not found; renewal needs 'certbot renew' in cron"
 
   if [[ "$(get_env APP_URL)" != "https://$domain" ]]; then
@@ -559,15 +581,14 @@ install_backend_host_deps() {
 
 # ---------- 8. backend env + systemd unit ----------
 write_backend_env() {
-  # deploy/.env (owner-edited) + fixed host values -> deploy/backend.env (EnvironmentFile, chmod 600).
-  local pg_user pg_db pg_pw redis_pw app_url chrome tmp
+  # .env (owner-edited) + fixed host values -> deploy/backend.env (EnvironmentFile, chmod 600).
+  local pg_user pg_db pg_pw redis_pw app_url chrome
   pg_user="$(env_or POSTGRES_USER resume)"; pg_db="$(env_or POSTGRES_DB resume_builder)"
   pg_pw="$(get_env POSTGRES_PASSWORD)"; redis_pw="$(get_env REDIS_PASSWORD)"
   app_url="$(get_env APP_URL)"; chrome="$(chrome_path)"
-  [[ -n "$pg_pw" && -n "$redis_pw" && -n "$app_url" ]] || die "deploy/.env is incomplete; run the full deploy"
+  [[ -n "$pg_pw" && -n "$redis_pw" && -n "$app_url" ]] || die ".env is incomplete; run the full deploy"
   as_app mkdir -p "$DATA_DIR/uploads" "$DATA_DIR/tmp/audio"
   # The API also loads <backend>/.env (dotenv) for keys the service does not set; warn so dev values do not leak in.
-  [[ -f "$BACKEND_DIR/.env" ]] && warn "$BACKEND_DIR/.env exists: its values apply wherever deploy/.env does not set the key (remove it on the server)"
 
   local fixed=(
     "NODE_ENV=production"
@@ -590,23 +611,20 @@ write_backend_env() {
     "PUPPETEER_EXECUTABLE_PATH=$chrome"
     "CHROME_PATH=$chrome"
   )
-  local skip="DOMAIN LETSENCRYPT_EMAIL BACKEND_DIR FRONTEND_DIR IMAGE_TAG POSTGRES_PORT REDIS_PORT FRONTEND_PORT BACKEND_PORT"
-  local kv; for kv in "${fixed[@]}"; do skip+=" ${kv%%=*}"; done
-  tmp="$(umask 077; mktemp "$DEPLOY_DIR/.backend.env.XXXXXX")"
-  {
-    echo "# GENERATED by deploy.sh from deploy/.env - edit deploy/.env instead and run deploy.sh --pull."
-    SKIP="$skip" awk '{ sub(/\r$/, "") } /^[A-Za-z_][A-Za-z0-9_]*=/ {
-        k = substr($0, 1, index($0, "=") - 1); n = split(ENVIRON["SKIP"], s, " ")
-        for (i = 1; i <= n; i++) if (s[i] == k) next
-        print }' "$ENV_FILE"
-    printf '%s\n' "${fixed[@]}"
-  } > "$tmp"
-  chmod 600 "$tmp"
-  if [[ -f "$BACKEND_ENV" ]] && cmp -s "$tmp" "$BACKEND_ENV"; then rm -f "$tmp"; BACKEND_ENV_CHANGED=0; return 0; fi
-  mv -f "$tmp" "$BACKEND_ENV"
-  [[ "$(stat -c %U "$BACKEND_ENV")" == "$APP_USER" ]] || run_root chown "$APP_USER:$APP_GROUP" "$BACKEND_ENV"
-  BACKEND_ENV_CHANGED=1
-  log "wrote deploy/backend.env (secrets not shown)"
+  # Single .env: upsert the fixed host values in place (other keys are left untouched).
+  local tmp kv k v changed=0
+  for kv in "${fixed[@]}"; do
+    k="${kv%%=*}"; v="${kv#*=}"
+    tmp="$(umask 077; mktemp "$DEPLOY_DIR/.env.XXXXXX")"
+    K="$k" V="$v" awk '{ sub(/\r$/, "") } index($0, ENVIRON["K"] "=") == 1 { if (!done) print ENVIRON["K"] "=" ENVIRON["V"]; done=1; next } { print }
+      END { if (!done) print ENVIRON["K"] "=" ENVIRON["V"] }' "$ENV_FILE" > "$tmp"
+    if cmp -s "$tmp" "$ENV_FILE"; then rm -f "$tmp"; else cat "$tmp" > "$ENV_FILE"; rm -f "$tmp"; changed=1; fi
+  done
+  chmod 600 "$ENV_FILE"
+  [[ "$(stat -c %U "$ENV_FILE")" == "$APP_USER" ]] || run_root chown "$APP_USER:$APP_GROUP" "$ENV_FILE"
+  BACKEND_ENV_CHANGED=$changed
+  [[ $changed -eq 1 ]] && log "updated .env host values (secrets not shown)"
+  return 0
 }
 BACKEND_ENV_CHANGED=0
 
@@ -629,6 +647,10 @@ WorkingDirectory=$BACKEND_DIR
 EnvironmentFile=$BACKEND_ENV
 # listen-loopback.cjs keeps the API on 127.0.0.1 (only the host nginx can reach it).
 ExecStart=$node --require $DEPLOY_DIR/host/listen-loopback.cjs dist/index.js
+# Memory guard: the Fastify API plus the lazily started Python audio worker (~320 MB while active).
+Environment=NODE_OPTIONS=--max-old-space-size=256
+MemoryHigh=700M
+MemoryMax=900M
 Restart=always
 RestartSec=3
 KillMode=mixed
@@ -673,16 +695,10 @@ backend_build()    { log "backend: build (tsc)";     app_run "$BACKEND_DIR" npm 
 backend_migrate() {
   log "backend: prisma migrate deploy"
   app_run "$BACKEND_DIR" ./node_modules/.bin/prisma migrate deploy
-  if [[ "$(env_or PRISMA_SYNC_SCHEMA true)" == "true" ]]; then
-    # prisma/migrations does not yet cover all of schema.prisma; db push fills the gap and refuses
-    # anything that would drop data (the deploy stops instead).
-    log "backend: prisma db push (non-destructive schema sync)"
-    app_run "$BACKEND_DIR" ./node_modules/.bin/prisma db push --skip-generate
-  fi
 }
 backend_seed() {
   if [[ $FORCE_SEED -eq 1 || ! -f "$SEED_MARKER" ]]; then
-    log "backend: seeding the database (first run only; resets sample jobs + demo user)"
+    log "backend: seeding the database (first run only; resets sample jobs; demo user only when SEED_DEMO_USER=true)"
     app_run "$BACKEND_DIR" ./node_modules/.bin/tsx prisma/seed.ts
     date -u +%FT%TZ > "$SEED_MARKER"
   fi
@@ -714,7 +730,7 @@ start_datastores() {
   for svc in postgres redis; do
     if ! container_running "$svc"; then
       if [[ $svc == postgres ]]; then port="$(env_or POSTGRES_PORT 5432)"; else port="$(env_or REDIS_PORT 6379)"; fi
-      port_in_use "$port" && die "127.0.0.1:$port ($svc) is already used by another program; set ${svc^^}_PORT in deploy/.env"
+      port_in_use "$port" && die "127.0.0.1:$port ($svc) is already used by another program; set ${svc^^}_PORT in .env"
     fi
   done
   log "starting postgres + redis (127.0.0.1 only)"
@@ -730,7 +746,7 @@ start_frontend() { # start_frontend [build]
     compose build "${args[@]}" frontend
   fi
   if ! container_running frontend && port_in_use "$(frontend_port)"; then
-    die "127.0.0.1:$(frontend_port) is already used by another program; set FRONTEND_PORT in deploy/.env"
+    die "127.0.0.1:$(frontend_port) is already used by another program; set FRONTEND_PORT in .env"
   fi
   # --remove-orphans also removes a backend container left from an all-Docker deploy.
   if ! compose up -d --wait --wait-timeout "$HEALTH_TIMEOUT" --remove-orphans frontend; then
@@ -802,7 +818,7 @@ full_deploy() {
   install_docker
   configure_ufw
   prepare_env
-  compose config --quiet || die "docker-compose.prod.yml / deploy/.env is invalid"
+  compose config --quiet || die "docker-compose.prod.yml / .env is invalid"
   start_datastores
   install_backend_host_deps
   link_frontend_public
@@ -816,7 +832,7 @@ full_deploy() {
   backend_build
   install_unit
   if ! systemctl is-active --quiet "$UNIT_NAME" && port_in_use "$(backend_port)"; then
-    die "127.0.0.1:$(backend_port) is already used by another program; set BACKEND_PORT in deploy/.env"
+    die "127.0.0.1:$(backend_port) is already used by another program; set BACKEND_PORT in .env"
   fi
   restart_backend
   state_set backend "$(git_rev "$BACKEND_DIR")"
@@ -826,6 +842,7 @@ full_deploy() {
 
   configure_host_nginx
   setup_tls
+  enable_compression
   smoke_test
   print_summary
   log "full deploy finished in $((SECONDS - t0))s"
@@ -845,7 +862,7 @@ fast_update() {
   local b_old b_new changes need_restart=0
   b_old="$(state_get backend)"; b_new="$(git_rev "$BACKEND_DIR")"
   write_backend_env
-  [[ $BACKEND_ENV_CHANGED -eq 1 ]] && { need_restart=1; updated+=("backend env (deploy/.env)"); }
+  [[ $BACKEND_ENV_CHANGED -eq 1 ]] && { need_restart=1; updated+=("backend env (.env)"); }
   if [[ "$b_old" != "$b_new" || ! -f "$BACKEND_DIR/dist/index.js" ]]; then
     changes="$(changed_files "$BACKEND_DIR" "$b_old" "$b_new")"
     if touches "$changes" '^package(-lock)?\.json$' || [[ ! -d "$BACKEND_DIR/node_modules" ]]; then
@@ -854,7 +871,7 @@ fast_update() {
       backend_generate
     fi
     if touches "$changes" '^prisma/'; then
-      backend_migrate; verify_admin_email; updated+=("database schema (migrate + db push)")
+      backend_migrate; verify_admin_email; updated+=("database schema (migrate deploy)")
     fi
     if touches "$changes" '^deploy/docker-compose\.prod\.yml$'; then
       start_datastores; updated+=("postgres/redis containers")
@@ -902,7 +919,7 @@ main() {
     logs)
       if [[ "$LOG_SERVICE" == "backend" ]]; then run_root journalctl -u "$UNIT_NAME" -f -n 200; return 0; fi
       install_docker >/dev/null
-      [[ -f "$ENV_FILE" ]] || die "deploy/.env not found"
+      [[ -f "$ENV_FILE" ]] || die ".env not found"
       if [[ -n "$LOG_SERVICE" ]]; then compose logs -f --tail 200 "$LOG_SERVICE"; else compose logs -f --tail 200; fi
       ;;
     restart)
@@ -910,11 +927,12 @@ main() {
       write_backend_env; install_unit; restart_backend; start_frontend
       ;;
     nginx)
-      [[ -f "$ENV_FILE" ]] || die "deploy/.env not found; run a full deploy first"
+      [[ -f "$ENV_FILE" ]] || die ".env not found; run a full deploy first"
       [[ -n "$DOMAIN_ARG" ]] && set_env DOMAIN "$DOMAIN_ARG"
       [[ -n "$EMAIL_ARG" ]] && set_env LETSENCRYPT_EMAIL "$EMAIL_ARG"
       configure_host_nginx
       setup_tls
+      enable_compression
       ;;
     update) fast_update ;;
     deploy) full_deploy ;;

@@ -44,7 +44,9 @@ export const env = {
   redisUrl: process.env.REDIS_URL || "redis://127.0.0.1:6379",
   redisTtlSeconds: num(process.env.REDIS_TTL_SECONDS, 300),
   adminEmail: process.env.ADMIN_EMAIL || "linux00011@gmail.com",
-  adminPassword: process.env.ADMIN_PASSWORD || "admin@123",
+  adminPassword: process.env.ADMIN_PASSWORD || "",
+  seedDemoUser: String(process.env.SEED_DEMO_USER || "false").toLowerCase() === "true",
+  demoPassword: process.env.DEMO_PASSWORD || "",
   adminName: process.env.ADMIN_NAME || "Admin",
   chromePath: process.env.CHROME_PATH || process.env.PUPPETEER_EXECUTABLE_PATH || "",
   appUrl,
@@ -58,11 +60,27 @@ export const env = {
   // Pasted app passwords often carry a trailing space or newline.
   smtpPass: (process.env.SMTP_PASS || process.env.SMTP_PASSWORD || "").trim(),
   smtpFrom: process.env.SMTP_FROM || process.env.MAIL_FROM || process.env.ADMIN_EMAIL || "noreply@localhost",
+  /** Fastify trustProxy: the hops whose X-Forwarded-For is believed (host nginx on loopback). */
+  trustProxy: process.env.TRUST_PROXY || "127.0.0.1,::1",
+  /** Offline DB-IP City Lite database (npm run geoip:update). */
+  geoipDbPath: process.env.GEOIP_DB_PATH || "data/geoip/dbip-city-lite.mmdb",
+  geoipIdleMs: num(process.env.GEOIP_IDLE_MS, 10 * 60_000),
   smtpRequireTls: bool(process.env.SMTP_REQUIRE_TLS ?? process.env.SMTP_ENABLE_STARTTLS_AUTO, true),
+  /** Path under the public site that reaches this API (nginx /rb-api/ -> backend). */
+  apiPublicPath,
+  /** SSO (optional). A provider's button shows only when both of its keys are set. */
+  googleClientId: (process.env.GOOGLE_CLIENT_ID || "").trim(),
+  googleClientSecret: (process.env.GOOGLE_CLIENT_SECRET || "").trim(),
+  facebookAppId: (process.env.FACEBOOK_APP_ID || "").trim(),
+  facebookAppSecret: (process.env.FACEBOOK_APP_SECRET || "").trim(),
+  /** Public origin the provider redirects back to (defaults to APP_URL). */
+  oauthRedirectBase: stripTrailingSlash(process.env.OAUTH_REDIRECT_BASE) || appUrl,
 };
 
 /** Secrets checked at startup. Names only — values are never logged. */
 const SECRET_KEYS = ["JWT_SECRET", "JWT_REFRESH_SECRET", "REFRESH_TOKEN_SECRET", "COOKIE_SECRET", "SESSION_SECRET"];
+
+export const MIN_ADMIN_PASSWORD = 12;
 
 export function assertEnv() {
   if (!env.databaseUrl) {
@@ -70,6 +88,11 @@ export function assertEnv() {
   }
   if (!env.isProd) return;
   const problems: string[] = [];
+  if (!env.adminPassword) {
+    problems.push("ADMIN_PASSWORD is missing (set it in .env; there is no default)");
+  } else if (env.adminPassword.length < MIN_ADMIN_PASSWORD) {
+    problems.push(`ADMIN_PASSWORD is shorter than ${MIN_ADMIN_PASSWORD} characters`);
+  }
   for (const key of SECRET_KEYS) {
     const value = process.env[key];
     // JWT_SECRET is mandatory; the others are checked only when set.

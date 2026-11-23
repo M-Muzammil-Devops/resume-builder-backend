@@ -7,7 +7,7 @@
 #   postgres + redis (named volumes) are published on 127.0.0.1 only, for the host backend.
 # The frontend uses the host network so it can reach the host backend on 127.0.0.1 (and nothing
 # is exposed beyond loopback: it binds HOSTNAME=127.0.0.1).
-# All values come from deploy/.env (created by deploy.sh). Paths are relative to this file.
+# All values come from <backend>/.env (created by deploy.sh). Paths are relative to this file.
 # (The backend Dockerfile stays in the repo for a future all-Docker production setup.)
 # -----------------------------------------------------------------------------
 name: resume-builder
@@ -16,15 +16,31 @@ x-logging: &logging
   driver: json-file
   options:
     max-size: "10m"
-    max-file: "5"
+    max-file: "3"
 
 services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    # Small-server tuning (2 CPU / 3.8 GB host).
+    command:
+      - postgres
+      - -c
+      - shared_buffers=64MB
+      - -c
+      - max_connections=20
+      - -c
+      - work_mem=4MB
+      - -c
+      - effective_cache_size=512MB
+      - -c
+      - maintenance_work_mem=32MB
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 1.0
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-resume}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in deploy/.env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in <backend>/.env}
       POSTGRES_DB: ${POSTGRES_DB:-resume_builder}
     ports:
       - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"     # loopback only (host backend)
@@ -42,8 +58,13 @@ services:
     image: redis:7-alpine
     restart: unless-stopped
     environment:
-      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD must be set in deploy/.env}
-    command: ["sh", "-c", "exec redis-server --appendonly yes --save 60 1000 --requirepass \"$${REDIS_PASSWORD}\""]
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD must be set in <backend>/.env}
+    # Everything the app stores in Redis (cache + audio job state) is written with a TTL, so volatile-lru
+    # evicts only expirable keys and never drops a key that has no expiry. 64 MB is far above real use.
+    command: ["sh", "-c", "exec redis-server --appendonly yes --save 60 1000 --maxmemory 64mb --maxmemory-policy volatile-lru --requirepass \"$${REDIS_PASSWORD}\""]
+    mem_limit: 96m
+    memswap_limit: 96m
+    cpus: 0.5
     ports:
       - "127.0.0.1:${REDIS_PORT:-6379}:6379"        # loopback only (host backend)
     volumes:
@@ -64,14 +85,19 @@ services:
         NEXT_PUBLIC_SITE_URL: ${APP_URL}
     image: resume-builder-frontend:${IMAGE_TAG:-latest}
     restart: unless-stopped
+    mem_limit: 320m
+    memswap_limit: 320m
+    cpus: 1.0
+    init: false                 # the image already runs tini
     network_mode: host          # reach the host backend on 127.0.0.1; listens on 127.0.0.1 only
     environment:
       NODE_ENV: production
+      NODE_OPTIONS: --max-old-space-size=192
       HOSTNAME: 127.0.0.1
       PORT: ${FRONTEND_PORT:-3000}
       API_INTERNAL_URL: http://127.0.0.1:${BACKEND_PORT:-4000}
       API_URL: http://127.0.0.1:${BACKEND_PORT:-4000}
-      NEXT_PUBLIC_SITE_URL: ${APP_URL:?APP_URL must be set in deploy/.env}
+      NEXT_PUBLIC_SITE_URL: ${APP_URL:?APP_URL must be set in <backend>/.env}
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:'+process.env.PORT+'/robots.txt').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 15s

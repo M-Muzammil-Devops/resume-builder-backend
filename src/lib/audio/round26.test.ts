@@ -142,6 +142,6 @@ test("round26 startup: restored jobs that are not really queued are released", a
 
 test("round26 capabilities list the conversation mode", () => {
   const { svc } = make();
-  assert.deepEqual(svc.capabilities().modes, ["noise", "voice", "conversation"]);
+  assert.deepEqual(svc.capabilities().modes, ["noise", "conversation"]);
   svc.close();
 });

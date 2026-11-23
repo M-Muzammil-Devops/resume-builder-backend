@@ -13,6 +13,7 @@ import { initRedis, redisStatus } from "./lib/redis";
 import { ensureUploadDirs } from "./lib/uploads";
 import { registerErrorHandler } from "./lib/httpErrors";
 import { authRoutes } from "./routes/auth";
+import { ssoRoutes } from "./routes/authSso";
 import { resumeRoutes } from "./routes/resumes";
 import { aiRoutes } from "./routes/ai";
 import { templateRoutes } from "./routes/templates";
@@ -23,7 +24,10 @@ import { companyRoutes } from "./routes/companies";
 import { locationRoutes } from "./routes/locations";
 import { adminRoutes, landingTemplateRoutes } from "./routes/admin";
 import { coverLetterRoutes } from "./routes/coverLetters";
+import { adminActivityRoutes, trackingRoutes } from "./routes/activity";
+import { adminPdfRoutes, publicTemplateSettingsRoutes } from "./routes/adminPdf";
 import { audioRoutes } from "./routes/audio";
+import { contactRoutes } from "./routes/contact";
 import { AudioService } from "./lib/audio/service";
 import { loadAudioConfig } from "./lib/audio/config";
 
@@ -45,6 +49,8 @@ async function main() {
   ensureUploadDirs();
 
   const app = Fastify({
+    // request.ip = the client address nginx puts in X-Forwarded-For; only the loopback hop is trusted.
+    trustProxy: env.trustProxy,
     logger: {
       level: env.logLevel,
       timestamp: () => `,"time":"${new Date().toISOString()}"`,
@@ -135,6 +141,8 @@ async function main() {
   app.get("/health", async () => ({ ok: true }));
 
   await app.register(authRoutes);
+  // SSO (Google / Facebook) + email magic code. Buttons show per GET /auth/providers.
+  await app.register(ssoRoutes);
   await app.register(resumeRoutes);
   await app.register(aiRoutes);
   await app.register(templateRoutes);
@@ -147,8 +155,14 @@ async function main() {
   await app.register(adminRoutes, { prefix: "/admin" });
   await app.register(coverLetterRoutes);
   await app.register(landingTemplateRoutes);
+  // Users & Activity, consent audit, page views, PDF/template control (admin routes are guarded).
+  await app.register(adminActivityRoutes, { prefix: "/admin" });
+  await app.register(adminPdfRoutes, { prefix: "/admin" });
+  await app.register(trackingRoutes);
+  await app.register(publicTemplateSettingsRoutes);
+  await app.register(contactRoutes);
 
-  // Audio Noise Remover / AI Voice Cleaner (DeepFilterNet3 worker, ffmpeg fallbacks). Temp files live
+  // Audio Noise Remover (DeepFilterNet3 worker, ffmpeg fallbacks). Temp files live
   // outside uploads/ and are deleted after 1 hour. A missing ffmpeg only disables this tool.
   const audio = new AudioService(loadAudioConfig(), app.log);
   try {

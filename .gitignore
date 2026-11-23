@@ -39,3 +39,12 @@ audio-worker/models/panns/
 *.pth
 *.onnx
 .cursor/
+
+# offline GeoIP database (npm run geoip:update)
+data/
+
+# backups / secrets (never commit)
+*.sql.gz
+ADMIN_PASSWORD*.txt
+data/geoip/
+.next/

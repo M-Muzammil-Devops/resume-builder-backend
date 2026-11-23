@@ -108,6 +108,91 @@ export function resetEmail(link: string): AuthEmail {
   });
 }
 
+/**
+ * Magic sign-in code: premium dark-header card with the 6-digit code in large spaced type.
+ * The code is digits only, so it is safe to place in the HTML as-is (still escaped).
+ */
+export function magicCodeEmail(code: string, opts: { minutes: number; newAccount?: boolean }): AuthEmail {
+  const support = supportAddress();
+  const year = new Date().getFullYear();
+  const subject = `${code} is your ResumeBuilder sign-in code`;
+  const heading = opts.newAccount ? "Welcome to ResumeBuilder ✨" : "Your magic sign-in code ✨";
+  const intro = opts.newAccount
+    ? "Enter this code to create your ResumeBuilder account and sign in."
+    : "Enter this code on the sign-in page to continue to your ResumeBuilder account.";
+  const expiry = `The code expires in ${opts.minutes} minutes and works once.`;
+  const ignore = "If you didn't ask for this code, you can ignore this email. Nobody can sign in without it.";
+  const text = [
+    "ResumeBuilder",
+    "",
+    heading,
+    "",
+    intro,
+    "",
+    `Your code: ${code}`,
+    "",
+    expiry,
+    ignore,
+    "",
+    "--",
+    support ? `Questions? Write to ${support}.` : "",
+    `© ${year} ResumeBuilder.`,
+  ]
+    .filter((line, i, all) => !(line === "" && all[i - 1] === ""))
+    .join("\n");
+  const digits = escapeHtml(code)
+    .split("")
+    .map(
+      (d) =>
+        `<td style="width:44px;height:56px;background:#eef3ff;border:1px solid #c7d4fb;border-radius:12px;font-family:'SFMono-Regular',Consolas,'Courier New',monospace;font-size:28px;font-weight:bold;color:#1e1b6b;text-align:center">${d}</td>`
+    )
+    .join('<td style="width:8px"></td>');
+  const supportHtml = support
+    ? `Questions? Write to <a href="mailto:${escapeHtml(support)}" style="color:#4f46e5">${escapeHtml(support)}</a>.<br>`
+    : "";
+  const html = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><title>${escapeHtml(subject)}</title></head>
+<body style="margin:0;padding:0;background:#0a0f26;font-family:Arial,Helvetica,sans-serif;color:#0b1230">
+<div style="display:none;max-height:0;overflow:hidden">Your ResumeBuilder code is ${escapeHtml(code)}. It expires in ${opts.minutes} minutes.</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#0a0f26;padding:32px 12px">
+<tr><td align="center">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;background:#ffffff;border-radius:20px;overflow:hidden">
+<tr><td style="background:#2563eb;background-image:linear-gradient(135deg,#2563eb 0%,#4338ca 55%,#6d28d9 100%);padding:22px 28px">
+<table role="presentation" cellpadding="0" cellspacing="0"><tr>
+<td style="width:34px;height:34px;border-radius:10px;background:#ffffff;color:#2457d6;font-weight:bold;font-size:14px;text-align:center">RB</td>
+<td style="padding-left:12px;color:#ffffff;font-size:18px;font-weight:bold;letter-spacing:.3px">ResumeBuilder</td>
+</tr></table>
+</td></tr>
+<tr><td style="padding:32px 28px 8px">
+<h1 style="margin:0 0 10px;font-size:22px;line-height:1.3;color:#0b1230">${escapeHtml(heading)}</h1>
+<p style="margin:0 0 24px;font-size:15px;line-height:1.6;color:#545e80">${escapeHtml(intro)}</p>
+<table role="presentation" cellpadding="0" cellspacing="0" align="center" style="margin:0 auto 24px"><tr>${digits}</tr></table>
+<p style="margin:0 0 8px;font-size:13px;line-height:1.6;color:#545e80;text-align:center">${escapeHtml(expiry)}</p>
+<p style="margin:0 0 24px;font-size:13px;line-height:1.6;color:#8f99ba;text-align:center">${escapeHtml(ignore)}</p>
+</td></tr>
+<tr><td style="padding:16px 28px;background:#f5f7ff;border-top:1px solid #e3e8fb;font-size:12px;line-height:1.6;color:#6b7399">
+${supportHtml}© ${year} ResumeBuilder. Never share this code with anyone, including our team.
+</td></tr>
+</table>
+</td></tr>
+</table>
+</body></html>`;
+  return { subject, text, html };
+}
+
+/** Sent instead of a code when someone asks to sign in with an email that has no account. */
+export function noAccountEmail(registerLink: string): AuthEmail {
+  return authEmail({
+    subject: "Sign-in attempt on ResumeBuilder",
+    heading: "No account uses this email yet",
+    intro: "Someone (hopefully you) asked for a ResumeBuilder sign-in code for this address, but there is no account for it. You can create one in a minute.",
+    buttonLabel: "Create your account",
+    link: registerLink,
+    expiry: "No code was sent and nothing changed.",
+    ignoreLine: "If this wasn't you, ignore this email.",
+  });
+}
+
 /** SMTP failure details that are safe to log: never the message, credentials or server banner. */
 export function mailErrorMeta(err: unknown): { code?: string; responseCode?: number } {
   const e = (err ?? {}) as { code?: unknown; responseCode?: unknown };

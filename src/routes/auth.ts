@@ -30,7 +30,7 @@ const locationFields = {
   city: z.string().max(80).optional(),
 };
 
-const emailField = z
+export const emailField = z
   .string()
   .trim()
   .max(254)
@@ -41,16 +41,16 @@ const emailField = z
     return parts.length >= 2 && parts.every((part) => part.length > 0);
   }, "Enter a valid email");
 
-function clientMeta(request: { headers: Record<string, unknown>; ip: string }) {
+export function clientMeta(request: { headers: Record<string, unknown>; ip: string }) {
   const ua = String(request.headers["user-agent"] || "").slice(0, 300);
   return { ua, ip: request.ip };
 }
 
-function normalizeEmail(email: string) {
+export function normalizeEmail(email: string) {
   return email.trim().toLowerCase();
 }
 
-function cleanName(name: string | undefined, email: string) {
+export function cleanName(name: string | undefined, email: string) {
   const stripped = (name || "").replace(/<[^>]*>/g, "").replace(/[<>]/g, "").trim();
   return stripped.slice(0, 80) || email.split("@")[0];
 }
@@ -64,7 +64,7 @@ function authInputError(error: z.ZodError) {
   return issue?.message || "Check your details and try again";
 }
 
-function publicAppUrl(request: FastifyRequest) {
+export function publicAppUrl(request: FastifyRequest) {
   return resolvePublicAppUrl({
     appUrl: env.appUrl,
     fallback: env.frontendUrl,
@@ -92,7 +92,7 @@ export function adminCookie(token: string | null): string {
 
 const GENERIC_RESET = "If an account exists for that email, we sent a reset link.";
 
-async function provisionNewUser(userId: string, log: FastifyRequest["log"]) {
+export async function provisionNewUser(userId: string, log: FastifyRequest["log"]) {
   try {
     await prisma.autoApplyCredit.create({
       data: { userId, remaining: 50 },
@@ -169,7 +169,7 @@ async function sendReset(request: FastifyRequest, user: { id: string; email: str
   }
 }
 
-async function sessionFor(app: FastifyInstance, user: { id: string; email: string; role: string; name: string | null; location?: string | null; country?: string | null; sessionEpoch?: number }) {
+export async function sessionFor(app: FastifyInstance, user: { id: string; email: string; role: string; name: string | null; location?: string | null; country?: string | null; sessionEpoch?: number }) {
   const jti = randomBytes(9).toString("base64url");
   const token = app.jwt.sign(
     { userId: user.id, email: user.email, role: user.role, jti, epoch: user.sessionEpoch ?? 0 },
@@ -478,14 +478,16 @@ export async function authRoutes(app: FastifyInstance) {
     return { user };
   });
 
-  app.post("/auth/demo", async (request) => {
+  app.post("/auth/demo", async (request, reply) => {
+    // Demo login is disabled unless SEED_DEMO_USER=true and DEMO_PASSWORD is set.
+    if (!env.seedDemoUser || env.demoPassword.length < 8) return reply.code(404).send({ error: "Not found" });
     const email = "demo@resume.local";
     let user = await prisma.user.findUnique({ where: { email } });
     if (!user) {
       user = await prisma.user.create({
         data: {
           email,
-          passwordHash: await bcrypt.hash("demo1234", 10),
+          passwordHash: await bcrypt.hash(env.demoPassword, 10),
           name: "Demo User",
           role: "user",
           emailVerifiedAt: new Date(),

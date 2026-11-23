@@ -4,8 +4,16 @@
  */
 
 export type OutputChoice = "same" | "mp3" | "wav" | "flac";
-/** noise = Remove noise, conversation = Keep all voices (phone calls, meetings), voice = Voice clean. */
-export type Mode = "noise" | "voice" | "conversation";
+/** noise = Remove noise, conversation = Keep all voices (phone calls, meetings). */
+export type Mode = "noise" | "conversation";
+
+/**
+ * Upload "mode" field → Mode. Anything else (including the retired "voice" = Voice clean mode that old
+ * clients may still send) falls back to plain noise removal instead of failing.
+ */
+export function parseMode(raw: unknown): Mode {
+  return raw === "conversation" ? "conversation" : "noise";
+}
 export type EngineName = "deepfilternet" | "rnnoise" | "afftdn";
 
 export type ProbeInfo = {
@@ -283,7 +291,7 @@ export function clampStrength(v: unknown, fallback = 80): number {
 /**
  * BUG-1340/1343: the most any frame may be pulled down, in dB. DeepFilterNet3 without a cap treats
  * quiet / far voices as noise and removes them (25-60 dB). Capped and graded instead:
- *   Remove noise / Voice clean: 0 → 6 dB, 20 → 8.4, 50 → 12, 80 → 15 (default), 100 → 18 dB.
+ *   Remove noise: 0 → 6 dB, 20 → 8.4, 50 → 12, 80 → 15 (default), 100 → 18 dB.
  *   Keep all voices (conversation): 8 → 12 dB (80 → 11.2) plus a little dry signal.
  * Never null (no "unlimited"), always monotonic.
  */
@@ -317,41 +325,6 @@ export function afftdnNr(strength: number, mode: Mode = "noise"): number {
 export function fallbackFilter(engine: "rnnoise" | "afftdn", strength: number, modelFile = "sh.rnnn", mode: Mode = "noise"): string {
   if (engine === "rnnoise") return `arnndn=m=${modelFile.replace(/[^\w.-]/g, "")}:mix=${rnnoiseMix(strength, mode)}`;
   return `afftdn=nr=${afftdnNr(strength, mode)}:nf=-30:tn=1`;
-}
-
-/** AI Voice Cleaner chain (before loudnorm): rumble cut, de-mud, presence, de-ess, gentle compression. */
-export const VOICE_CHAIN = [
-  "highpass=f=70",
-  "lowpass=f=14000",
-  "equalizer=f=200:t=q:w=1:g=-2",
-  "equalizer=f=3200:t=q:w=1.2:g=3",
-  "deesser",
-  "acompressor=threshold=-20dB:ratio=3:attack=5:release=120",
-].join(",");
-
-export type LoudnormMeasure = { input_i: string; input_tp: string; input_lra: string; input_thresh: string; target_offset: string };
-
-/** Pull the loudnorm JSON block out of ffmpeg stderr. */
-export function parseLoudnorm(stderr: string): LoudnormMeasure | null {
-  const m = /\{[^{}]*"input_i"[^{}]*\}/.exec(stderr);
-  if (!m) return null;
-  try {
-    const j = JSON.parse(m[0]) as Record<string, string>;
-    const keys = ["input_i", "input_tp", "input_lra", "input_thresh", "target_offset"] as const;
-    for (const k of keys) if (!Number.isFinite(Number.parseFloat(j[k]))) return null;
-    return { input_i: j.input_i, input_tp: j.input_tp, input_lra: j.input_lra, input_thresh: j.input_thresh, target_offset: j.target_offset };
-  } catch {
-    return null;
-  }
-}
-
-export function loudnormPass1(): string {
-  return "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json";
-}
-
-export function loudnormPass2(m: LoudnormMeasure): string {
-  const n = (v: string) => String(Math.round(Number.parseFloat(v) * 100) / 100);
-  return `loudnorm=I=-16:TP=-1.5:LRA=11:measured_I=${n(m.input_i)}:measured_TP=${n(m.input_tp)}:measured_LRA=${n(m.input_lra)}:measured_thresh=${n(m.input_thresh)}:offset=${n(m.target_offset)}:linear=true`;
 }
 
 /** Overall "Noise floor dB" and integrated loudness from an astats+ebur128 pass. */
@@ -586,5 +559,5 @@ export function peaksArgs(input: string): string[] {
   return ["-nostdin", "-hide_banner", "-v", "error", "-protocol_whitelist", "file,pipe", "-i", `file:${input}`, "-ac", "1", "-ar", "800", "-f", "s16le", "-c:a", "pcm_s16le", "pipe:1"];
 }
 
-export const JOB_STATES = ["queued", "probing", "denoising", "enhancing", "encoding", "done", "failed", "canceled"] as const;
+export const JOB_STATES = ["queued", "probing", "denoising", "encoding", "done", "failed", "canceled"] as const;
 export type JobState = (typeof JOB_STATES)[number];

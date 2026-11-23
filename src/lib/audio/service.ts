@@ -7,16 +7,12 @@ import { CHUNK_SECONDS, DeepFilterWorker } from "./dfWorker";
 import { RedisJobStore, toStored, type JobStore, type StoredJob } from "./jobStore";
 import {
   RESTART_MESSAGE,
-  VOICE_CHAIN,
   bandProgress,
   decodeArgs,
   dfAttenLimit,
   encodeArgs,
   fallbackFilter,
-  loudnormPass1,
-  loudnormPass2,
   outputFor,
-  parseLoudnorm,
   parseMetrics,
   backgroundLevels,
   dryMix,
@@ -99,7 +95,6 @@ const STEP_LABEL: Record<string, string> = {
   queued: "Waiting in queue",
   probing: "Analyzing format",
   denoising: "Removing noise",
-  enhancing: "Loudness & EQ",
   encoding: "Encoding",
   done: "Done",
   failed: "Failed",
@@ -130,7 +125,7 @@ export class AudioService {
   private lastSaved = new Map<string, number>();
 
   constructor(readonly cfg: AudioConfig, private log: Log, store?: JobStore) {
-    this.worker = new DeepFilterWorker(cfg.pythonPath, cfg.workerPath, cfg.device, log);
+    this.worker = new DeepFilterWorker(cfg.pythonPath, cfg.workerPath, cfg.device, log, ["-u"], cfg.workerIdleMs);
     this.store = store ?? new RedisJobStore();
   }
 
@@ -215,8 +210,7 @@ export class AudioService {
       { ffmpeg: this.ffmpegOk, ffprobe: this.ffprobeOk, engine: this.preferredEngine(), encoders: this.encoders.size },
       "audio tool ready"
     );
-    // Warm the DeepFilterNet model in the background so the first job is fast.
-    if (this.wantDf()) void this.worker.start();
+    // The DeepFilterNet worker (~320 MB) starts lazily on the first job and stops after AUDIO_WORKER_IDLE_MIN idle minutes.
   }
 
   close() {
@@ -257,7 +251,7 @@ export class AudioService {
         activeJobsPerUser: 1,
         retentionMinutes: Math.round(this.cfg.ttlMs / 60_000),
       },
-      modes: ["noise", "voice", "conversation"],
+      modes: ["noise", "conversation"],
       outputs: ["same", "mp3", "wav", "flac"],
       encoders: ["aac", "alac", "libmp3lame", "libopus", "libvorbis", "flac", "wmav2", "ac3", "eac3", "libopencore_amrnb", "pcm_s16le", "pcm_s16be"].filter((e) =>
         this.encoders.has(e)
@@ -599,7 +593,6 @@ export class AudioService {
     const src = path.join(job.dir, "input");
     const dec = path.join(job.dir, "dec.wav");
     const den = path.join(job.dir, "den.wav");
-    const enh = path.join(job.dir, "enh.wav");
 
     this.set(job, "probing", 6);
     await this.ff(job, decodeArgs(src, dec, job.input.streamIndex, this.cfg.maxSeconds, job.input.channels), timeoutMs);
@@ -610,7 +603,7 @@ export class AudioService {
     // Denoise: DeepFilterNet3 → RNNoise → afftdn.
     this.set(job, "denoising", 15);
     let engine: EngineName | null = null;
-    const denoiseEnd = job.mode === "voice" ? 70 : 82;
+    const denoiseEnd = 82;
     // BUG-1340: capped, graded attenuation (6-18 dB; Keep all voices 8-12 dB + 10 % dry). Never unlimited.
     const attenDb = dfAttenLimit(job.strength, job.mode);
     const dry = dryMix(job.strength, job.mode);
@@ -661,25 +654,8 @@ export class AudioService {
     if (this.progressTimer) clearInterval(this.progressTimer);
     this.set(job, "denoising", denoiseEnd);
 
-    let finalWav = den;
-    if (job.mode === "voice") {
-      this.set(job, "enhancing", denoiseEnd + 2);
-      const p1 = await run(
-        this.cfg.ffmpegPath,
-        ["-nostdin", "-hide_banner", "-nostats", "-protocol_whitelist", "file,pipe", "-i", `file:${den}`, "-af", `${VOICE_CHAIN},${loudnormPass1()}`, "-f", "null", "-"],
-        { timeoutMs, signal: job.abort.signal }
-      );
-      if (p1.aborted) throw new AudioError(499, "CANCELED", "Canceled");
-      const m = parseLoudnorm(p1.stderr);
-      const loud = m ? loudnormPass2(m) : "loudnorm=I=-16:TP=-1.5:LRA=11";
-      this.set(job, "enhancing", 80);
-      await this.ff(
-        job,
-        ["-nostdin", "-hide_banner", "-v", "error", "-y", "-protocol_whitelist", "file,pipe", "-i", `file:${den}`, "-af", `${VOICE_CHAIN},${loud}`, "-ar", "48000", "-c:a", "pcm_f32le", "-f", "wav", `file:${enh}`],
-        timeoutMs
-      );
-      finalWav = enh;
-    }
+    // The denoised file is the final mix (the old "Voice clean" EQ + loudness pass was removed).
+    const finalWav = den;
 
     this.set(job, "encoding", 86);
     let spec = job.spec;
@@ -707,7 +683,7 @@ export class AudioService {
     const peaksClean = pcmClean ? peaksFromPcm(pcmClean, 160) : [];
     const bg = pcmOriginal && pcmClean ? backgroundLevels(windowLevelsDb(pcmOriginal), windowLevelsDb(pcmClean)) : { beforeDb: null, afterDb: null };
     const st = await fs.stat(out());
-    for (const f of [dec, den, enh]) await fs.rm(f, { force: true }).catch(() => undefined);
+    for (const f of [dec, den]) await fs.rm(f, { force: true }).catch(() => undefined);
 
     job.result = {
       format: spec.label,

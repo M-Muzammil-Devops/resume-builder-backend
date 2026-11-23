@@ -31,8 +31,29 @@ export class DeepFilterWorker {
     private deviceWanted: string,
     private log?: Log,
     /** Interpreter flags before the script (tests run a Node fake, which has no -u). */
-    private interpreterArgs: string[] = ["-u"]
+    private interpreterArgs: string[] = ["-u"],
+    /** Stop the worker after this many ms without a job (0 = never). It restarts lazily on the next job. */
+    private idleMs = 0
   ) {}
+
+  private idleTimer: NodeJS.Timeout | null = null;
+
+  private clearIdle() {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = null;
+  }
+
+  private armIdle() {
+    this.clearIdle();
+    if (this.idleMs <= 0 || !this.child) return;
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = null;
+      if (this.pending.size > 0) return this.armIdle();
+      this.log?.info({ engine: "deepfilternet", idleMs: this.idleMs }, "audio worker idle, stopping to free memory");
+      this.stop();
+    }, this.idleMs);
+    this.idleTimer.unref();
+  }
 
   available(): boolean {
     return existsSync(this.python) && existsSync(this.script) && Date.now() >= this.disabledUntil;
@@ -98,6 +119,7 @@ export class DeepFilterWorker {
           clearTimeout(p.timer);
           this.pending.delete(msg.id);
           p.resolve({ ok: Boolean(msg.ok), error: msg.error, seconds: msg.seconds, chunks: msg.chunks });
+          if (this.pending.size === 0) this.armIdle();
         }
       });
       let errTail = "";
@@ -152,9 +174,13 @@ export class DeepFilterWorker {
     onProgress?: (done: number, total: number) => void,
     dryMix = 0
   ): Promise<DenoiseResult> {
+    this.clearIdle();
     const ok = await this.start();
     if (!ok || !this.child) return { ok: false, error: this.lastError || "worker unavailable" };
-    if (signal?.aborted) return { ok: false, error: "aborted" };
+    if (signal?.aborted) {
+      this.armIdle();
+      return { ok: false, error: "aborted" };
+    }
     return new Promise<DenoiseResult>((resolve) => {
       const onAbort = () => {
         // The worker processes one file at a time; killing it is the only way to stop it. It restarts lazily.
@@ -187,6 +213,7 @@ export class DeepFilterWorker {
   }
 
   stop() {
+    this.clearIdle();
     const c = this.child;
     this.child = null;
     this.ready = null;
