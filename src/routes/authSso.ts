@@ -334,7 +334,7 @@ export async function ssoRoutes(app: FastifyInstance) {
     }
     try {
       const sent = await sendMail({ to: email, ...mail });
-      request.log.info({ delivered: sent.delivered, intent }, "magic code email attempted");
+      request.log.info({ delivered: sent.delivered, intent, messageId: sent.messageId, smtp: sent.response }, "magic code email attempted");
     } catch (err) {
       request.log.warn({ ...mailErrorMeta(err) }, "magic code email failed");
     }

@@ -147,7 +147,7 @@ async function sendVerification(
   const mail = verifyEmail(link);
   try {
     const sent = await sendMail({ to: user.email, ...mail });
-    request.log.info({ email: user.email, delivered: sent.delivered, messageId: sent.messageId }, "verification email attempted");
+    request.log.info({ email: user.email, delivered: sent.delivered, messageId: sent.messageId, smtp: sent.response }, "verification email attempted");
     return { delivered: sent.delivered };
   } catch (err) {
     request.log.warn({ email: user.email, ...mailErrorMeta(err) }, "verification email failed");
@@ -161,7 +161,7 @@ async function sendReset(request: FastifyRequest, user: { id: string; email: str
   const mail = resetEmail(link);
   try {
     const sent = await sendMail({ to: user.email, ...mail });
-    request.log.info({ email: user.email, delivered: sent.delivered, messageId: sent.messageId }, "reset email attempted");
+    request.log.info({ email: user.email, delivered: sent.delivered, messageId: sent.messageId, smtp: sent.response }, "reset email attempted");
     return { delivered: sent.delivered };
   } catch (err) {
     request.log.warn({ email: user.email, ...mailErrorMeta(err) }, "reset email failed");

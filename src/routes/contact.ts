@@ -5,6 +5,10 @@ import { mailConfigured, sendMail } from "../lib/mailer";
 
 /** Public contact form (/contact page) → one email to ADMIN_EMAIL through the existing SMTP mailer. */
 export const CONTACT_LIMIT_PER_HOUR = 5;
+/** Same sender address, whatever network it comes from (QA run3: rotating proxy IPs slipped past the per-IP limit). */
+export const CONTACT_EMAIL_LIMIT_PER_HOUR = 5;
+/** Site-wide ceiling so a botnet cannot flood the admin inbox. */
+export const CONTACT_GLOBAL_LIMIT_PER_HOUR = 60;
 const HOUR_MS = 60 * 60 * 1000;
 
 export type ContactInput = { name: string; email: string; message: string };
@@ -40,8 +44,9 @@ export function isBot(body: unknown): boolean {
 }
 
 /**
- * Real client IP. The backend only listens on 127.0.0.1 behind nginx, which overwrites X-Real-IP with
- * $remote_addr, so the header is trusted only when the socket peer is loopback.
+ * Real client IP. Fastify's trustProxy (TRUST_PROXY, default loopback only) already resolves request.ip from the
+ * X-Forwarded-For that host nginx overwrites with $remote_addr. X-Real-IP is a fallback used only when the peer is
+ * still loopback (a local caller without X-Forwarded-For); a remote peer can never choose its own IP.
  */
 export function contactClientIp(request: Pick<FastifyRequest, "ip" | "headers">): string {
   const peer = request.ip || "";
@@ -80,6 +85,13 @@ export async function contactRoutes(
     }
 
     const { name, email, message } = check.value;
+    if (
+      hitLimit(`contact:email:${email.toLowerCase()}`, CONTACT_EMAIL_LIMIT_PER_HOUR, HOUR_MS) ||
+      hitLimit("contact:all", CONTACT_GLOBAL_LIMIT_PER_HOUR, HOUR_MS)
+    ) {
+      reply.header("Retry-After", "3600");
+      return reply.code(429).send({ error: "Too many messages from this network. Please try again in an hour.", code: "RATE_LIMITED" });
+    }
     const when = new Date().toISOString();
     const subject = `[ResumeBuilder] Contact form: ${name}`.slice(0, 160);
     const text = `New message from the ResumeBuilder contact form\n\nName: ${name}\nEmail: ${email}\nIP: ${ip}\nTime: ${when}\n\n${message}\n`;
@@ -89,6 +101,7 @@ export async function contactRoutes(
       `<pre style="white-space:pre-wrap;font-family:inherit">${escapeHtml(message)}</pre>`;
     try {
       const res = await send({ to: to(), subject, text, html });
+      request.log.info({ delivered: res.delivered, messageId: res.messageId, smtp: res.response }, "contact email attempted");
       if (!res.delivered) return reply.code(503).send({ error: "Messages can't be delivered right now. Please try again later.", code: "MAIL_UNAVAILABLE" });
     } catch (err) {
       request.log.error({ err: err instanceof Error ? err.message : String(err) }, "contact form: send failed");

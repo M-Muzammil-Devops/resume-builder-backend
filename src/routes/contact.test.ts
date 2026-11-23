@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import Fastify from "fastify";
-import { CONTACT_LIMIT_PER_HOUR, checkContact, contactClientIp, contactRoutes, isBot } from "./contact";
+import { CONTACT_EMAIL_LIMIT_PER_HOUR, CONTACT_LIMIT_PER_HOUR, checkContact, contactClientIp, contactRoutes, isBot } from "./contact";
 
 type Sent = { to: string; subject: string; text: string; html?: string };
 
@@ -73,12 +73,36 @@ test(`POST /contact is limited to ${CONTACT_LIMIT_PER_HOUR} per hour per IP`, as
   const sent: Sent[] = [];
   const app = await build(sent);
   for (let i = 0; i < CONTACT_LIMIT_PER_HOUR; i++) {
-    const r = await app.inject({ method: "POST", url: "/contact", headers: { "x-real-ip": "10.9.9.9" }, payload: good });
+    const r = await app.inject({ method: "POST", url: "/contact", headers: { "x-real-ip": "10.9.9.9" }, payload: { ...good, email: `ip${i}@example.com` } });
     assert.equal(r.statusCode, 202);
   }
-  const blocked = await app.inject({ method: "POST", url: "/contact", headers: { "x-real-ip": "10.9.9.9" }, payload: good });
+  const blocked = await app.inject({ method: "POST", url: "/contact", headers: { "x-real-ip": "10.9.9.9" }, payload: { ...good, email: "ip9@example.com" } });
   assert.equal(blocked.statusCode, 429);
-  const other = await app.inject({ method: "POST", url: "/contact", headers: { "x-real-ip": "10.9.9.10" }, payload: good });
+  const other = await app.inject({ method: "POST", url: "/contact", headers: { "x-real-ip": "10.9.9.10" }, payload: { ...good, email: "fresh@example.com" } });
   assert.equal(other.statusCode, 202);
+  await app.close();
+});
+
+test(`POST /contact is limited to ${CONTACT_EMAIL_LIMIT_PER_HOUR} per hour per sender email, even from rotating IPs`, async () => {
+  const sent: Sent[] = [];
+  const app = await build(sent);
+  const payload = { ...good, email: "Rotating@Example.com" };
+  for (let i = 0; i < CONTACT_EMAIL_LIMIT_PER_HOUR; i++) {
+    const r = await app.inject({ method: "POST", url: "/contact", headers: { "x-real-ip": `10.7.0.${i + 1}` }, payload });
+    assert.equal(r.statusCode, 202);
+  }
+  const blocked = await app.inject({ method: "POST", url: "/contact", headers: { "x-real-ip": "10.7.0.99" }, payload: { ...payload, email: "rotating@example.com" } });
+  assert.equal(blocked.statusCode, 429);
+  assert.equal(sent.length, CONTACT_EMAIL_LIMIT_PER_HOUR);
+  await app.close();
+});
+
+test("contact IP: a remote peer cannot pick its IP with X-Real-IP; trustProxy resolves nginx's X-Forwarded-For", async () => {
+  const app = Fastify({ trustProxy: "127.0.0.1,::1" });
+  app.get("/ip", async (request) => ({ ip: contactClientIp(request) }));
+  const viaNginx = await app.inject({ method: "GET", url: "/ip", remoteAddress: "127.0.0.1", headers: { "x-forwarded-for": "203.0.113.7" } });
+  assert.equal(viaNginx.json().ip, "203.0.113.7");
+  const spoof = await app.inject({ method: "GET", url: "/ip", remoteAddress: "198.51.100.4", headers: { "x-forwarded-for": "1.2.3.4", "x-real-ip": "1.2.3.4" } });
+  assert.equal(spoof.json().ip, "198.51.100.4");
   await app.close();
 });
