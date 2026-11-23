@@ -1,0 +1,69 @@
+{
+ "sr": 48000,
+ "seconds": 62.15,
+ "background_dbfs": -50.0,
+ "rt60": 0.9,
+ "direct": 0.12,
+ "segments": [
+  {
+   "start": 1.5,
+   "end": 6.37,
+   "talker": "near",
+   "level_dbfs": -20.0
+  },
+  {
+   "start": 7.17,
+   "end": 12.25,
+   "talker": "far1",
+   "level_dbfs": -36.0
+  },
+  {
+   "start": 13.05,
+   "end": 18.41,
+   "talker": "near",
+   "level_dbfs": -20.0
+  },
+  {
+   "start": 19.21,
+   "end": 24.36,
+   "talker": "far2",
+   "level_dbfs": -40.0
+  },
+  {
+   "start": 25.16,
+   "end": 29.89,
+   "talker": "far1",
+   "level_dbfs": -36.0
+  },
+  {
+   "start": 30.69,
+   "end": 35.31,
+   "talker": "near",
+   "level_dbfs": -20.0
+  },
+  {
+   "start": 36.11,
+   "end": 41.48,
+   "talker": "far2",
+   "level_dbfs": -40.0
+  },
+  {
+   "start": 42.28,
+   "end": 46.85,
+   "talker": "far1",
+   "level_dbfs": -36.0
+  },
+  {
+   "start": 47.65,
+   "end": 52.9,
+   "talker": "near",
+   "level_dbfs": -20.0
+  },
+  {
+   "start": 53.7,
+   "end": 60.35,
+   "talker": "far2",
+   "level_dbfs": -40.0
+  }
+ ]
+}

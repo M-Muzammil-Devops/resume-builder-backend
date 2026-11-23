@@ -7,7 +7,7 @@ import { planSaveError } from "../lib/planAccess";
 import { redactPublicContent } from "../lib/publicResume";
 import { publicError } from "../lib/httpErrors";
 import { storedResumeContent as storedContent, storedResumeDesign } from "../lib/resumeContent";
-import { MAX_FIELD_CHARS, oversizedField, oversizedHeaderField } from "../lib/resumeSchema";
+import { MAX_FIELD_CHARS, designError, oversizedField, oversizedHeaderField, photoUrlError } from "../lib/resumeSchema";
 
 /** BUG-1402: one over-long field is a 400, never silently stored or truncated. */
 export function tooLongError(input: { content?: unknown; design?: unknown }): string | null {
@@ -98,6 +98,8 @@ export async function resumeRoutes(app: FastifyInstance) {
     if (!body.success) return reply.code(400).send(publicError(body.error).body);
     const tooLong = tooLongError(body.data);
     if (tooLong) return reply.code(400).send({ error: tooLong });
+    const invalid = designError(body.data.design) || photoUrlError(body.data.content);
+    if (invalid) return reply.code(400).send({ error: invalid });
 
     if (request.user.role !== "admin") {
       const count = await prisma.resume.count({ where: { userId: request.user.userId } });
@@ -137,6 +139,8 @@ export async function resumeRoutes(app: FastifyInstance) {
     const body = parsed.data;
     const tooLong = tooLongError(body);
     if (tooLong) return reply.code(400).send({ error: tooLong });
+    const invalid = designError(body.design) || photoUrlError(body.content);
+    if (invalid) return reply.code(400).send({ error: invalid });
 
     const existing = await prisma.resume.findFirst({
       where: { id, userId: request.user.userId },

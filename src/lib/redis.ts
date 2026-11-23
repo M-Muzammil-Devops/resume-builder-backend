@@ -4,6 +4,7 @@ type RedisLike = {
   get(key: string): Promise<string | null>;
   set(key: string, value: string, mode?: string, ttl?: number): Promise<unknown>;
   del(...keys: string[]): Promise<unknown>;
+  scan?(cursor: string, ...args: (string | number)[]): Promise<[string, string[]]>;
   quit(): Promise<unknown>;
 };
 
@@ -68,6 +69,43 @@ export async function cacheDel(...keys: string[]) {
   } catch {
     /* ignore */
   }
+}
+
+/** Delete every key that starts with `prefix` (SCAN based, never KEYS). */
+export async function cacheDelPrefix(prefix: string) {
+  if (!client?.scan) return;
+  try {
+    let cursor = "0";
+    do {
+      const [next, keys] = await client.scan(cursor, "MATCH", `${prefix}*`, "COUNT", 200);
+      cursor = next;
+      if (keys.length) await client.del(...keys);
+    } while (cursor !== "0");
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Every key that starts with `prefix` (SCAN based, never KEYS). Empty when Redis is off. */
+export async function cacheKeys(prefix: string, max = 5000): Promise<string[]> {
+  if (!client?.scan) return [];
+  const out: string[] = [];
+  try {
+    let cursor = "0";
+    do {
+      const [next, keys] = await client.scan(cursor, "MATCH", `${prefix}*`, "COUNT", 200);
+      cursor = next;
+      out.push(...keys);
+    } while (cursor !== "0" && out.length < max);
+  } catch {
+    /* ignore */
+  }
+  return [...new Set(out)];
+}
+
+/** Test hook: inject a fake client. */
+export function __setRedisClientForTests(fake: unknown) {
+  client = fake as RedisLike | null;
 }
 
 export function redisStatus() {

@@ -1,9 +1,36 @@
+# Keep the build context small and free of secrets.
+.git
+.gitignore
 node_modules
 dist
-.git
-*.md
-.env*
-!.env.example
 coverage
+logs
+uploads
+tmp
 *.log
+*.md
+*.tsbuildinfo
 .DS_Store
+.vscode
+.idea
+# env files (never baked into the image)
+.env
+.env.*
+*.bak
+*.pem
+*.key
+# audio worker dev artifacts
+audio-worker/.venv
+audio-worker/**/__pycache__
+audio-worker/testdata
+audio-worker/test_*.py
+audio-worker/models/panns
+# unit / e2e tests are not part of the server image
+src/**/*.test.ts
+src/e2e
+src/lib/audio/testdata
+# deployment tooling (only the entrypoint is needed in the image)
+deploy/*
+!deploy/docker
+!deploy/docker/**
+docker-compose*.yml

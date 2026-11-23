@@ -1,4 +1,5 @@
 import { scrubSampleText } from "../lib/sampleText";
+import { isLetterPage, isSingleColumnLayout, normalizePageSize, resolveColumns, resolvePhotoSlot, type ResumeContent } from "../shared";
 import { joinUrl, originOf } from "../lib/urls";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
@@ -8,12 +9,13 @@ import { prisma } from "../prisma";
 import { env } from "../config/env";
 import { resolveChromeExecutable } from "../lib/chrome";
 import { storedResumeContent, storedResumeDesign } from "../lib/resumeContent";
-import { safeImageUrl } from "../lib/resumeSchema";
+import { safePhotoUrl } from "../lib/resumeSchema";
 import { tooLongError } from "./resumes";
 import {
   EXPORT_MIME,
   PrintRenderError,
   docxFromText,
+  loadDocxPhoto,
   exportErrorBody,
   parseExportFormat,
   type ExportFormat,
@@ -94,7 +96,8 @@ type Design = {
   headerStyle?: "default" | "banner" | "centered";
   photoPosition?: "left" | "right";
   titlePlacement?: "below" | "beside";
-  sectionHeadingStyle?: "underline" | "icon-line";
+  sectionHeadingStyle?: "underline" | "icon-line" | "numbered";
+  headerMonogram?: boolean;
   contactLayout?: "row" | "grid";
   entryLayout?: "side-meta" | "stacked";
 };
@@ -102,9 +105,16 @@ type Design = {
 type Theme = {
   accent: string;
   ink: string;
-  headingStyle: "underline" | "icon-line";
+  headingStyle: "underline" | "icon-line" | "numbered";
   entryLayout: "side-meta" | "stacked";
 };
+
+/** BUG-1296: the header photo the export HTML shows (real photo slot only, never the monogram). */
+export async function docxPhotoFromHtml(html: string) {
+  const m = /<div class="rb-photo-slot" style="width:([\d.]+)px;height:([\d.]+)px[^"]*">\s*<img src="([^"]+)"/.exec(html);
+  if (!m) return null;
+  return loadDocxPhoto(m[3].replace(/&amp;/g, "&"), Number(m[1]), Number(m[2]));
+}
 
 function paperBg(bg?: string) {
   switch (bg) {
@@ -133,7 +143,7 @@ function columnWidths(layout?: Design["columnLayout"]) {
 }
 
 function sectionHeading(title: string, theme: Theme) {
-  const color = theme.headingStyle === "icon-line" ? theme.accent : theme.ink;
+  const color = theme.headingStyle === "underline" ? theme.ink : theme.accent;
   return `<h2 style="margin:0 0 8px;padding-bottom:3px;border-bottom:1.5px solid ${color};color:${color};font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase">${e(title)}</h2>`;
 }
 
@@ -205,21 +215,35 @@ export const CONTACT_SEPARATOR = '<span style="display:none" aria-hidden="true">
 
 function renderHeader(sec: AnySec, design: Design, theme: Theme): string {
   const settings = settingsOf(sec);
-  const photoSrc = safeImageUrl(sec.photoUrl);
-  const showPhoto = settings.photo !== false && Boolean(photoSrc);
-  const photoPos = design.photoPosition || "right";
+  const photoSrc = safePhotoUrl(sec.photoUrl);
+  // Same single slot as the canvas/PDF: photo, else the template monogram, same side and shape.
+  const slot = resolvePhotoSlot({
+    photoOn: settings.photo !== false,
+    photoUrl: photoSrc,
+    photoStyle: typeof settings.photoStyle === "string" ? settings.photoStyle : undefined,
+    headerStyle: design.headerStyle,
+    photoPosition: design.photoPosition,
+    monogram: Boolean(design.headerMonogram),
+    fullName: plain(sec.fullName),
+    editing: false,
+  });
+  const ring = typeof settings.photoAccent === "string" && /^#[0-9a-f]{3,8}$/i.test(settings.photoAccent) ? settings.photoAccent : theme.accent;
   const titleBeside = design.titlePlacement === "beside";
   const headerStyle = design.headerStyle || "default";
   const isBanner = headerStyle === "banner";
   const isCentered = headerStyle === "centered";
   const bits = contactBits(sec);
 
-  const photoHtml = showPhoto
-    ? `<div style="width:88px;height:88px;border-radius:999px;overflow:hidden;background:#d5d8dd;flex-shrink:0;box-shadow:0 0 0 2px ${theme.accent}33">
+  const slotBox = `width:${slot.width}px;height:${slot.height}px;border-radius:${slot.radius};overflow:hidden;flex-shrink:0;box-shadow:0 0 0 2px ${ring}33`;
+  const photoHtml =
+    slot.kind === "photo"
+      ? `<div class="rb-photo-slot" style="${slotBox};background:#d5d8dd">
         <img src="${escapeHtml(photoSrc)}" alt="" style="width:100%;height:100%;object-fit:cover"/>
       </div>`
-    : "";
-
+      : slot.kind === "monogram"
+        ? // Initials come from a CSS attribute so the TXT/DOCX text never gains a stray "MM".
+          `<div class="rb-photo-slot rb-mono" data-initials="${escapeHtml(slot.initials)}" aria-hidden="true" style="${slotBox};background:${theme.accent};color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:${slot.initialsFontSize}px;line-height:1;letter-spacing:.02em;white-space:nowrap"></div>`
+        : "";
   const nameColor = isBanner ? "#ffffff" : theme.ink;
   const titleColor = isBanner ? "rgba(255,255,255,.9)" : theme.accent;
   const contactColor = isBanner ? "rgba(255,255,255,.88)" : "#5a6470";
@@ -255,8 +279,8 @@ function renderHeader(sec: AnySec, design: Design, theme: Theme): string {
 
   const inner =
     isCentered
-      ? `<div style="text-align:center">${nameBlock}${contactHtml}</div>`
-      : photoPos === "left" && photoHtml
+      ? `<div style="text-align:center;width:100%">${photoHtml ? `<div style="display:flex;justify-content:center;margin-bottom:8px">${photoHtml}</div>` : ""}${nameBlock}${contactHtml}</div>`
+      : slot.position === "left"
         ? `${photoHtml}${textCol}`
         : `${textCol}${photoHtml}`;
 
@@ -328,6 +352,15 @@ function renderSection(sec: AnySec, theme: Theme): string {
             st.groupName !== false
               ? `<div style="font-weight:700;font-size:11px;color:${ink};margin-bottom:4px">${e(cat.name)}</div>`
               : "";
+          if (layout === "underline") {
+            return `<div style="margin-bottom:8px">${group}
+              <div style="display:flex;flex-wrap:wrap;gap:4px 12px">${skills
+                .map(
+                  (s) =>
+                    `<span data-rb-skill style="border-bottom:1.5px solid ${theme.accent};padding:1px 0;font-size:10.5px;color:#374151">${escapeHtml(s)}</span>`
+                )
+                .join("")}</div></div>`;
+          }
           if (layout === "tags") {
             return `<div style="margin-bottom:8px">${group}
               <div style="display:flex;flex-wrap:wrap;gap:5px">${skills
@@ -481,7 +514,7 @@ function renderSection(sec: AnySec, theme: Theme): string {
   </section>`;
 }
 
-export function resumeToHtml(content: unknown, design: unknown, title: string): string {
+export function resumeToHtml(content: unknown, design: unknown, title: string, layoutKey?: string | null): string {
   const c = (content || {}) as {
     sections?: AnySec[];
     leftColumnIds?: string[];
@@ -496,7 +529,7 @@ export function resumeToHtml(content: unknown, design: unknown, title: string): 
   const lineHeight = 1.35 + (Number(d.lineHeight ?? 1) * 0.08);
   const marginLevel = Math.min(8, Math.max(0, Number(d.pageMargins ?? 4)));
   const margin = Math.round(48 + (marginLevel / 8) * 48);
-  const letter = d.pageSize === "US Letter";
+  const letter = isLetterPage(d.pageSize);
   const bg = paperBg(d.background);
   const widths = columnWidths(d.columnLayout);
   const theme: Theme = {
@@ -510,12 +543,23 @@ export function resumeToHtml(content: unknown, design: unknown, title: string): 
   const byId = new Map(sections.map((s) => [String(s.id), s]));
   const header = sections.find((s) => s.type === "header");
 
-  const leftIds = c.leftColumnIds?.length
-    ? c.leftColumnIds
-    : ["summary", "experience", "projects"];
-  const rightIds = c.rightColumnIds?.length
-    ? c.rightColumnIds
-    : ["skills", "achievements", "certifications", "education"];
+  // BUG-1280: same column rules as the canvas/PDF; sections in neither list join the main column.
+  const columns = resolveColumns(
+    {
+      sections: sections as unknown as ResumeContent["sections"],
+      // Legacy fallback only when the resume has no column lists at all; an empty side column is
+      // a real choice (one column) and must not be refilled here.
+      ...(c.leftColumnIds?.length || c.rightColumnIds?.length
+        ? { leftColumnIds: c.leftColumnIds || [], rightColumnIds: c.rightColumnIds || [] }
+        : {
+            leftColumnIds: ["summary", "experience", "projects"],
+            rightColumnIds: ["skills", "achievements", "certifications", "education"],
+          }),
+    },
+    d.columnLayout
+  );
+  const leftIds = columns.left;
+  const rightIds = columns.right;
 
   const renderIds = (ids: string[]) =>
     ids
@@ -534,7 +578,7 @@ export function resumeToHtml(content: unknown, design: unknown, title: string): 
     .map((s) => renderSection(s, theme))
     .join("\n");
 
-  const isSingle = d.columnLayout === "single" || rightIds.length === 0;
+  const isSingle = isSingleColumnLayout(layoutKey, d.columnLayout, rightIds.length);
 
   const body = `
     ${header ? renderHeader(header, d, theme) : ""}
@@ -559,6 +603,7 @@ export function resumeToHtml(content: unknown, design: unknown, title: string): 
     @page { size: ${letter ? "8.5in 11in" : "A4"}; margin: 0; }
     * { box-sizing: border-box; }
     html, body { margin: 0; padding: 0; }
+    .rb-mono::before { content: attr(data-initials); }
     body {
       font-family: '${font.replace(/'/g, "\\'")}', 'Segoe UI', Helvetica, Arial, sans-serif;
       color: ${ink};
@@ -590,8 +635,7 @@ function safeFileName(raw: string, fallback: string) {
 }
 
 function pageSizeOf(design: unknown): "A4" | "US Letter" {
-  const size = (design as { pageSize?: string } | null)?.pageSize;
-  return size === "US Letter" ? "US Letter" : "A4";
+  return normalizePageSize((design as { pageSize?: string } | null)?.pageSize);
 }
 
 export async function exportRoutes(app: FastifyInstance) {
@@ -816,7 +860,8 @@ export async function exportRoutes(app: FastifyInstance) {
         .send(text);
     }
     const fontFamily = (design as { fontFamily?: string } | null)?.fontFamily;
-    const buffer = await docxFromText(text, { pageSize: pageSizeOf(design), fontFamily });
+    const photo = await docxPhotoFromHtml(html);
+    const buffer = await docxFromText(text, { pageSize: pageSizeOf(design), fontFamily, photo });
     return reply
       .header("Content-Type", EXPORT_MIME.docx)
       .header("Content-Disposition", `attachment; filename="${baseName}.docx"; filename*=UTF-8''${encoded}.docx`)
@@ -835,7 +880,7 @@ export async function exportRoutes(app: FastifyInstance) {
     if (!row) return reply.code(404).send({ error: "Not found" });
 
     const baseName = safeFileName(query.filename || row.title, "Resume");
-    const html = resumeToHtml(scrubSampleText(row.content), row.design, row.title);
+    const html = resumeToHtml(scrubSampleText(row.content), row.design, row.title, row.layoutKey);
 
     if (format === "pdf") {
       return buildPdfReply(reply, request, row.id, pageSizeOf(row.design), baseName);
@@ -861,6 +906,7 @@ export async function exportRoutes(app: FastifyInstance) {
         content: z.any(),
         design: z.any(),
         format: z.string().optional(),
+        layoutKey: z.string().max(40).optional(),
       })
       .parse(request.body ?? {});
     const tooLong = tooLongError(body);
@@ -871,7 +917,7 @@ export async function exportRoutes(app: FastifyInstance) {
 
     const row = await prisma.resume.findFirst({
       where: { id, userId: request.user.userId },
-      select: { id: true, title: true, content: true, design: true },
+      select: { id: true, title: true, content: true, design: true, layoutKey: true },
     });
     if (!row) return reply.code(404).send({ error: "Not found" });
 
@@ -881,7 +927,7 @@ export async function exportRoutes(app: FastifyInstance) {
     const design = body.design === undefined ? row.design : storedResumeDesign(body.design);
     const title = (body.title || row.title || "Resume").trim().slice(0, 100) || "Resume";
     const baseName = safeFileName(body.filename || title, "Resume");
-    const html = resumeToHtml(scrubSampleText(content), design, title);
+    const html = resumeToHtml(scrubSampleText(content), design, title, body.layoutKey ?? row.layoutKey);
 
     // Persist latest design/content so next GET export matches too
     if (body.content !== undefined || body.design !== undefined || body.title) {
@@ -901,9 +947,9 @@ export async function exportRoutes(app: FastifyInstance) {
 
   app.post("/export/preview", async (request) => {
     const body = z
-      .object({ title: z.string(), content: z.any(), design: z.any() })
+      .object({ title: z.string(), content: z.any(), design: z.any(), layoutKey: z.string().max(40).optional() })
       .parse(request.body);
     // Same rules as a stored resume: unknown keys, unsafe images and markup are dropped first.
-    return { html: resumeToHtml(storedResumeContent(body.content), storedResumeDesign(body.design), body.title.slice(0, 200)) };
+    return { html: resumeToHtml(storedResumeContent(body.content), storedResumeDesign(body.design), body.title.slice(0, 200), body.layoutKey) };
   });
 }

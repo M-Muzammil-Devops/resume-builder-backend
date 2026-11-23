@@ -23,6 +23,9 @@ import { companyRoutes } from "./routes/companies";
 import { locationRoutes } from "./routes/locations";
 import { adminRoutes, landingTemplateRoutes } from "./routes/admin";
 import { coverLetterRoutes } from "./routes/coverLetters";
+import { audioRoutes } from "./routes/audio";
+import { AudioService } from "./lib/audio/service";
+import { loadAudioConfig } from "./lib/audio/config";
 
 declare module "fastify" {
   interface FastifyInstance {
@@ -144,6 +147,17 @@ async function main() {
   await app.register(adminRoutes, { prefix: "/admin" });
   await app.register(coverLetterRoutes);
   await app.register(landingTemplateRoutes);
+
+  // Audio Noise Remover / AI Voice Cleaner (DeepFilterNet3 worker, ffmpeg fallbacks). Temp files live
+  // outside uploads/ and are deleted after 1 hour. A missing ffmpeg only disables this tool.
+  const audio = new AudioService(loadAudioConfig(), app.log);
+  try {
+    await audio.init();
+  } catch (err) {
+    app.log.warn({ err: err instanceof Error ? err.message : String(err) }, "audio tool init failed");
+  }
+  app.addHook("onClose", async () => audio.close());
+  await app.register(audioRoutes, { service: audio });
 
   await app.listen({ port: env.apiPort, host: "0.0.0.0" });
   app.log.info(

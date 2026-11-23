@@ -1,0 +1,23 @@
+# HTTP only (default, or before a certificate exists). ${SERVER_NAME} is filled in by the nginx image.
+include /etc/nginx/snippets/http-common.conf;
+
+# Plain HTTP (e.g. http://<public-ip>): always serve the CSP without upgrade-insecure-requests.
+map $server_port $rb_csp {
+    default $rb_csp_noupgrade;
+}
+
+server {
+    listen 80 default_server;
+    server_name ${SERVER_NAME};
+
+    include /etc/nginx/snippets/acme.conf;
+    include /etc/nginx/snippets/app.conf;
+}
+
+# Internal-only endpoint (port 8080 is NOT published): the backend's PDF renderer (Chromium) opens
+# /print/:id here (PRINT_BASE_URL=http://nginx:8080), with the same /rb-api routing as the public site.
+server {
+    listen 8080;
+    server_name _;
+    include /etc/nginx/snippets/app.conf;
+}

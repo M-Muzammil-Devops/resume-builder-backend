@@ -1,4 +1,7 @@
-import { Document, ExternalHyperlink, Packer, Paragraph, TextRun } from "docx";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { AlignmentType, Document, ExternalHyperlink, ImageRun, Packer, Paragraph, TextRun } from "docx";
+import { isKnownSamplePhoto } from "./samplePhotos";
 
 export type ExportFormat = "pdf" | "docx" | "txt";
 
@@ -36,10 +39,68 @@ function paragraph(line: string, font: string) {
   });
 }
 
+/** A header photo ready for DOCX: PNG bytes plus the slot size in CSS pixels (BUG-1296). */
+export interface DocxPhoto {
+  data: Buffer;
+  width: number;
+  height: number;
+}
+
+function photoParagraph(photo?: DocxPhoto | null): Paragraph[] {
+  if (!photo) return [];
+  return [
+    new Paragraph({
+      alignment: AlignmentType.LEFT,
+      spacing: { after: 120 },
+      children: [new ImageRun({ type: "png", data: photo.data, transformation: { width: photo.width, height: photo.height } })],
+    }),
+  ];
+}
+
+/** Locations of the frontend public folder that holds /templates/photos/<id>.webp. */
+function samplePhotoPaths(url: string): string[] {
+  const rel = url.replace(/^\//, "");
+  const dirs = [process.env.FRONTEND_PUBLIC_DIR, path.resolve(process.cwd(), "..", "resume-builder-frontend", "public")];
+  return dirs.filter((d): d is string => Boolean(d)).map((d) => path.join(d, rel));
+}
+
+/**
+ * BUG-1296: bytes of a header photo (an uploaded data URL or a real sample photo) as a square-cropped PNG
+ * of the slot size, or null when it cannot be read. DOCX cannot hold WebP, so everything is re-encoded.
+ */
+export async function loadDocxPhoto(photoUrl: string, width: number, height: number): Promise<DocxPhoto | null> {
+  try {
+    let source: Buffer | null = null;
+    const data = /^data:image\/(?:png|jpe?g|webp);base64,([A-Za-z0-9+/=]+)$/i.exec(photoUrl);
+    if (data) source = Buffer.from(data[1], "base64");
+    else if (isKnownSamplePhoto(photoUrl)) {
+      for (const file of samplePhotoPaths(photoUrl)) {
+        try {
+          source = await readFile(file);
+          break;
+        } catch {
+          /* try the next location */
+        }
+      }
+    }
+    if (!source) return null;
+    const w = Math.max(1, Math.round(width));
+    const h = Math.max(1, Math.round(height));
+    const sharp = (await import("sharp")).default;
+    const png = await sharp(source, { limitInputPixels: 40_000_000 })
+      .resize(w * 2, h * 2, { fit: "cover" })
+      .png()
+      .toBuffer();
+    return { data: png, width: w, height: h };
+  } catch {
+    return null;
+  }
+}
+
 /** Server-side DOCX from the same plain text the TXT export uses. */
 export async function docxFromText(
   text: string,
-  options: { pageSize: "A4" | "US Letter"; fontFamily?: string }
+  options: { pageSize: "A4" | "US Letter"; fontFamily?: string; photo?: DocxPhoto | null }
 ): Promise<Buffer> {
   const letter = options.pageSize === "US Letter";
   const font = options.fontFamily || "Calibri";
@@ -52,7 +113,7 @@ export async function docxFromText(
             margin: { top: 1080, right: 1080, bottom: 1080, left: 1080 },
           },
         },
-        children: text.split("\n").map((line) => paragraph(line, font)),
+        children: [...photoParagraph(options.photo), ...text.split("\n").map((line) => paragraph(line, font))],
       },
     ],
   });

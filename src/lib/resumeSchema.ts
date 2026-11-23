@@ -1,4 +1,7 @@
+import { z } from "zod";
 import { fileKind } from "./uploads";
+import { isLetterPage } from "../shared/layout";
+import { isKnownSamplePhoto } from "./samplePhotos";
 
 /**
  * BUG-1401 / BUG-1402: server-side shape and size rules for stored resume data.
@@ -48,7 +51,7 @@ const SECTION_SETTINGS_KEYS = [
 const DESIGN_KEYS = [
   "accentColor", "inkColor", "fontFamily", "fontSize", "lineHeight", "pageMargins", "sectionSpacing",
   "columnLayout", "background", "showBranding", "pageSize", "headerStyle", "photoPosition",
-  "titlePlacement", "sectionHeadingStyle", "contactLayout", "entryLayout",
+  "titlePlacement", "sectionHeadingStyle", "contactLayout", "entryLayout", "headerMonogram", "listColumns", "density",
 ];
 
 /** Keys whose value is an image source, validated by safeImageUrl instead of the text rules. */
@@ -152,6 +155,8 @@ export function safeImageUrl(raw: unknown): string {
 
   if (value.startsWith("/")) {
     if (/^\/uploads\/[\w\-/.]+$/.test(value) && !value.includes("..") && !/\.svgz?$/i.test(value)) return value;
+    // Landing templates' same-origin sample headshots (public/templates/photos).
+    if (isKnownSamplePhoto(value)) return value;
     return "";
   }
 
@@ -212,4 +217,77 @@ export function oversizedField(value: unknown, limit = MAX_FIELD_CHARS, path = "
     }
   }
   return null;
+}
+
+/**
+ * BUG-1294: a resume photo is either the user's own upload (an inline PNG/JPEG/WebP data URL whose
+ * bytes really are that format) or one of the landing templates' same-origin sample headshots
+ * (/templates/photos/<id>.webp). External URLs, /uploads paths and anything else are refused, so the
+ * share page never loads a tracking pixel and the PDF renderer never fetches a third-party host.
+ */
+export function safePhotoUrl(raw: unknown): string {
+  if (typeof raw !== "string") return "";
+  const value = raw.trim();
+  if (!value) return "";
+  if (isKnownSamplePhoto(value)) return value;
+  if (!/^data:image\/(png|jpe?g|webp);base64,/i.test(value)) return "";
+  return safeImageUrl(value);
+}
+
+/** First header photoUrl the API refuses (BUG-1294), as an error message, or null. */
+export function photoUrlError(content: unknown): string | null {
+  if (!isRecord(content) || !Array.isArray(content.sections)) return null;
+  for (const section of content.sections) {
+    if (!isRecord(section)) continue;
+    const url = section.photoUrl;
+    if (url === undefined || url === null || url === "") continue;
+    if (typeof url !== "string" || !safePhotoUrl(url)) {
+      return "Photo must be an uploaded PNG, JPEG or WebP image";
+    }
+  }
+  return null;
+}
+
+/** The editor's Background swatches (DesignPanel BACKGROUNDS) and export paperBg. */
+export const DESIGN_BACKGROUNDS = ["white", "soft-gray", "mint", "warm"] as const;
+const HEX = z.string().regex(/^#[0-9a-f]{3,8}$/i);
+const LEVEL = z.number().finite().min(0).max(10);
+
+/** BUG-1299: every design value the app knows, with its allowed enum or range. */
+export const designSchema = z
+  .object({
+    accentColor: HEX,
+    inkColor: HEX,
+    fontFamily: z.string().trim().min(1).max(60).regex(/^[\w .'-]+$/),
+    fontSize: LEVEL,
+    lineHeight: LEVEL,
+    pageMargins: z.number().finite().min(0).max(8),
+    sectionSpacing: LEVEL,
+    columnLayout: z.enum(["single", "wide-left", "equal", "wide-right"]),
+    background: z.enum(DESIGN_BACKGROUNDS),
+    showBranding: z.boolean(),
+    pageSize: z.string().max(20).refine((v) => /^a4$/i.test(v.trim()) || isLetterPage(v), "pageSize"),
+    headerStyle: z.enum(["default", "banner", "centered"]),
+    photoPosition: z.enum(["left", "right"]),
+    titlePlacement: z.enum(["below", "beside"]),
+    sectionHeadingStyle: z.enum(["underline", "icon-line", "numbered", "banner", "centered-rule", "ruled-center"]),
+    contactLayout: z.enum(["row", "grid"]),
+    entryLayout: z.enum(["side-meta", "stacked", "date-left"]),
+    headerMonogram: z.boolean(),
+    listColumns: z.number().int().min(1).max(4),
+    density: z.enum(["comfortable", "compact"]),
+  })
+  .partial();
+
+/** Short 400 message for the first invalid design value, or null. Unknown keys are dropped later. */
+export function designError(design: unknown): string | null {
+  if (design === undefined) return null;
+  if (!isRecord(design)) return "Invalid design";
+  const known = pick(design, DESIGN_KEYS) as Record<string, unknown>;
+  // A missing optional value may arrive as null from older clients: treat it as unset.
+  for (const key of Object.keys(known)) if (known[key] === null) delete known[key];
+  const parsed = designSchema.safeParse(known);
+  if (parsed.success) return null;
+  const issue = parsed.error.issues[0];
+  return `Invalid design value: ${issue?.path.join(".") || "design"}`;
 }

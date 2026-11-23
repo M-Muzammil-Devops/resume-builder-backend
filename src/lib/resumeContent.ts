@@ -1,6 +1,7 @@
 import { sanitizeValue } from "./sanitizeHtml";
+import { normalizePageSize } from "../shared/layout";
 import { HREF_KEY, LINK_LABEL_KEYS, looksLikeUrl, safeHrefValue, safeLinkLabel } from "./safeLink";
-import { IMAGE_KEYS, pruneResumeContent, pruneResumeDesign, safeImageUrl } from "./resumeSchema";
+import { IMAGE_KEYS, pruneResumeContent, pruneResumeDesign, safeImageUrl, safePhotoUrl } from "./resumeSchema";
 
 const SAMPLE = new Set([
   "your name",
@@ -41,6 +42,7 @@ function limitFor(key: string | null): number {
 /** Drop stored sample text and cap field length. Sample copy stays a placeholder, not data. */
 export function cleanResumeValue(value: unknown, key: string | null = null): unknown {
   if (typeof value === "string") {
+    if (key === "photoUrl") return safePhotoUrl(value);
     if (key && IMAGE_KEYS.has(key)) return safeImageUrl(value);
     // BUG-1240: no save-time blanking by value; sample copy is dropped only at export time.
     if (key && HREF_KEY.test(key)) return safeHrefValue(value);
@@ -115,5 +117,8 @@ export function storedResumeContent(value: unknown): object {
 
 /** Design holds colours/font names only; strip any markup so it can never break out of CSS/HTML. */
 export function storedResumeDesign(value: unknown): object {
-  return sanitizeValue(pruneResumeDesign(value)) as object;
+  const design = sanitizeValue(pruneResumeDesign(value)) as Record<string, unknown>;
+  // BUG-704: "Letter" / "letter" are stored as the canonical "US Letter".
+  if (design && typeof design === "object" && "pageSize" in design) design.pageSize = normalizePageSize(design.pageSize);
+  return design as object;
 }

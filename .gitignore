@@ -20,3 +20,20 @@ uploads/
 *.bak
 *.log
 *.tsbuildinfo
+
+# audio tool (round 20)
+audio-worker/.venv/
+audio-worker/__pycache__/
+tmp/
+
+# deployment (never commit generated secrets / state)
+deploy/.env
+deploy/.seeded
+*.pem
+*.key
+*.p12
+# large ML weights (not used by the current worker; > GitHub's 100 MB limit)
+audio-worker/models/panns/
+*.pth
+*.onnx
+.cursor/

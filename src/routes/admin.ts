@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "../prisma";
 import { adminGuard, adminOf } from "../lib/adminAuth";
-import { cacheDel, cacheGet, cacheSet, redisStatus } from "../lib/redis";
+import { cacheDel, cacheDelPrefix, cacheGet, cacheSet, redisStatus } from "../lib/redis";
 import { publicUploadUrl, rejectUpload, saveUpload, writePlaceholderPreview } from "../lib/uploads";
 import { env } from "../config/env";
 import { adminUserWhere } from "../lib/adminSearch";
@@ -55,6 +55,9 @@ function mapLanding(t: {
  * Admin API. Registered with prefix "/admin" (see index.ts); every route in this
  * plugin is behind adminGuard (auth + admin role), applied once at router level.
  */
+/** Cache key prefix for the public landing templates list; invalidated on admin create/update/delete. */
+export const LANDING_TEMPLATES_CACHE_PREFIX = "landing:templates:v1";
+
 export async function adminRoutes(app: FastifyInstance) {
   app.addHook("onRequest", adminGuard(app));
 
@@ -285,7 +288,8 @@ export async function adminRoutes(app: FastifyInstance) {
       },
     });
 
-    await cacheDel("admin:stats:v1", "landing:templates:v1");
+    await cacheDel("admin:stats:v1");
+    await cacheDelPrefix(LANDING_TEMPLATES_CACHE_PREFIX);
     request.log.info(
       { templateId: row.id, department: row.department, admin: admin.email },
       "landing template uploaded"
@@ -315,7 +319,8 @@ export async function adminRoutes(app: FastifyInstance) {
     const existing = await prisma.landingTemplate.findUnique({ where: { id }, select: { id: true } });
     if (!existing) return reply.code(404).send({ error: "Template not found" });
     const row = await prisma.landingTemplate.update({ where: { id }, data: body });
-    await cacheDel("admin:stats:v1", "landing:templates:v1");
+    await cacheDel("admin:stats:v1");
+    await cacheDelPrefix(LANDING_TEMPLATES_CACHE_PREFIX);
     request.log.info({ templateId: id, admin: admin.email }, "landing template updated");
     return { template: mapLanding(row) };
   });
@@ -326,7 +331,8 @@ export async function adminRoutes(app: FastifyInstance) {
     const existing = await prisma.landingTemplate.findUnique({ where: { id }, select: { id: true } });
     if (!existing) return reply.code(404).send({ error: "Template not found" });
     await prisma.landingTemplate.delete({ where: { id } });
-    await cacheDel("admin:stats:v1", "landing:templates:v1");
+    await cacheDel("admin:stats:v1");
+    await cacheDelPrefix(LANDING_TEMPLATES_CACHE_PREFIX);
     request.log.info({ templateId: id, admin: admin.email }, "landing template deleted");
     return { ok: true };
   });
@@ -343,7 +349,7 @@ export async function landingTemplateRoutes(app: FastifyInstance) {
       })
       .parse(request.query);
 
-    const cacheKey = `landing:templates:v1:${q.photo || "all"}:${q.columns || "all"}:${q.department || "all"}`;
+    const cacheKey = `${LANDING_TEMPLATES_CACHE_PREFIX}:${q.photo || "all"}:${q.columns || "all"}:${q.department || "all"}`;
     const cached = await cacheGet<{ templates: unknown[] }>(cacheKey);
     if (cached) return cached;
 
