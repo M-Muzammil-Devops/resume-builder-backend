@@ -9,6 +9,12 @@
 #                                          the demo user, so deploy.sh runs it only on the first deploy.
 set -eu
 
+# PDF export: loopback forwarder 127.0.0.1:$PRINT_PROXY_PORT -> $PRINT_PROXY_TARGET (see print-proxy.cjs).
+# Restarted automatically if it ever exits.
+if [ -n "${PRINT_PROXY_TARGET:-}" ]; then
+  ( while :; do node /usr/local/lib/print-proxy.cjs || true; sleep 2; done ) &
+fi
+
 if [ "${RUN_MIGRATIONS:-true}" = "true" ]; then
   echo "[entrypoint] prisma migrate deploy"
   ./node_modules/.bin/prisma migrate deploy

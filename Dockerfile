@@ -96,6 +96,7 @@ COPY --chown=node:node prisma ./prisma
 COPY --chown=node:node src ./src
 COPY --chown=node:node audio-worker ./audio-worker
 COPY deploy/docker/backend-entrypoint.sh /usr/local/bin/backend-entrypoint.sh
+COPY deploy/docker/print-proxy.cjs /usr/local/lib/print-proxy.cjs
 RUN sed -i 's/\r$//' /usr/local/bin/backend-entrypoint.sh \
  && chmod 0755 /usr/local/bin/backend-entrypoint.sh \
  && mkdir -p /app/uploads /app/tmp/audio \
@@ -106,5 +107,6 @@ EXPOSE 4000
 HEALTHCHECK --interval=15s --timeout=5s --start-period=90s --retries=5 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.API_PORT||4000)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/backend-entrypoint.sh"]
+# -g: forward signals to the whole process group (server + PDF print forwarder).
+ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/usr/local/bin/backend-entrypoint.sh"]
 CMD ["node", "dist/index.js"]

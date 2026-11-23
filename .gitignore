@@ -29,6 +29,8 @@ tmp/
 # deployment (never commit generated secrets / state)
 deploy/.env
 deploy/.seeded
+deploy/backend.env
+deploy/.state/
 *.pem
 *.key
 *.p12
