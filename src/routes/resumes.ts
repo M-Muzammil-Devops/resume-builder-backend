@@ -2,7 +2,9 @@ import { randomBytes } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "../prisma";
-import { coverLetter } from "../ai/gemini";
+import { coverLetterAi } from "../ai/gemini";
+import { generateAndSaveLetter } from "../lib/coverLetterService";
+import { stableJson } from "../lib/coverLetterGen";
 import { planSaveError } from "../lib/planAccess";
 import { resumeLimitError } from "./userDashboard";
 import { redactPublicContent } from "../lib/publicResume";
@@ -161,6 +163,16 @@ export async function resumeRoutes(app: FastifyInstance) {
         isComplete: body.isComplete,
       },
     });
+    // Batch 2: a real content/title change after the letter was written shows "regenerate cover letter?".
+    const changed =
+      (body.content !== undefined && stableJson(storedContent(body.content)) !== stableJson(storedContent(existing.content))) ||
+      (body.title !== undefined && row.title !== existing.title);
+    if (changed) {
+      await prisma.coverLetter.updateMany({
+        where: { resumeId: id, userId: request.user.userId, generatedAt: { not: null }, resumeUpdatedAfter: false },
+        data: { resumeUpdatedAfter: true },
+      });
+    }
     return { resume: toDoc(row) };
   });
 
@@ -220,32 +232,37 @@ export async function resumeRoutes(app: FastifyInstance) {
 
   app.post("/resumes/:id/complete", { preHandler: [app.authenticate] }, async (request, reply) => {
     const { id } = request.params as { id: string };
-    const body = z.object({ jobDescription: z.string().optional() }).parse(request.body ?? {});
+    const parsed = z
+      .object({
+        jobDescription: z.string().max(16000).optional(),
+        /** Batch 2: finalize only by default; the editor then opens the "Generate Cover Letter" dialog. */
+        generateLetter: z.boolean().optional(),
+        tone: z.enum(["professional", "concise", "enthusiastic"]).optional(),
+        targetRole: z.string().max(240).optional(),
+        targetCompany: z.string().max(240).optional(),
+      })
+      .safeParse(request.body ?? {});
+    if (!parsed.success) return reply.code(400).send(publicError(parsed.error).body);
+    const body = parsed.data;
 
     const row = await prisma.resume.findFirst({
       where: { id, userId: request.user.userId },
     });
     if (!row) return reply.code(404).send({ error: "Not found" });
 
-    const doc = toDoc(row);
-    const letterBody = await coverLetter(doc, body.jobDescription);
-
     const updated = await prisma.resume.update({
       where: { id },
       data: { isComplete: true },
     });
-
-    const letter = await prisma.coverLetter.upsert({
-      where: { resumeId: id },
-      create: {
-        userId: request.user.userId,
-        resumeId: id,
-        title: `Cover Letter — ${row.title}`,
-        body: letterBody,
-      },
-      update: { body: letterBody, title: `Cover Letter — ${row.title}` },
+    if (!body.generateLetter) {
+      const existingLetter = await prisma.coverLetter.findUnique({ where: { resumeId: id } });
+      return { resume: toDoc(updated), coverLetter: existingLetter };
+    }
+    const { letter } = await generateAndSaveLetter(prisma, coverLetterAi, {
+      userId: request.user.userId,
+      resume: updated,
+      input: { tone: body.tone, targetRole: body.targetRole, targetCompany: body.targetCompany, jobDescription: body.jobDescription },
     });
-
     return { resume: toDoc(updated), coverLetter: letter };
   });
 }

@@ -200,6 +200,13 @@ export async function coverLetter(
   return result.body;
 }
 
+/** Batch 2: AI cover letter body from a prepared prompt; null when Gemini is off or fails (caller uses the template). */
+export async function coverLetterAi(prompt: string): Promise<string | null> {
+  if (!process.env.GEMINI_API_KEY) return null;
+  const result = await generateJson<{ body?: string }>(prompt, { body: "" });
+  return typeof result?.body === "string" && result.body.trim() ? result.body : null;
+}
+
 export async function tailorForJob(
   doc: ResumeDocument,
   jobDescription: string

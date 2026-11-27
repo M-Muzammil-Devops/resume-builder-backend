@@ -212,6 +212,15 @@ model CoverLetter {
   resume    Resume?  @relation(fields: [resumeId], references: [id], onDelete: SetNull)
   title     String
   body      String
+  // Batch 2: auto cover letter from a finalized resume. source: "ai" | "template" | null (hand-written).
+  tone               String    @default("professional")
+  targetRole         String?
+  targetCompany      String?
+  jobDescription     String?
+  source             String?
+  generatedAt        DateTime?
+  // The linked resume was edited after this letter was generated (shows "regenerate?").
+  resumeUpdatedAfter Boolean   @default(false)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

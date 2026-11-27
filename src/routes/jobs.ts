@@ -230,6 +230,7 @@ export async function jobRoutes(app: FastifyInstance) {
     const letters = await prisma.coverLetter.findMany({
       where: { userId: request.user.userId },
       orderBy: { updatedAt: "desc" },
+      include: { resume: { select: { id: true, title: true, isComplete: true, updatedAt: true } } },
     });
     return { coverLetters: letters };
   });
