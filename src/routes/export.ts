@@ -668,9 +668,11 @@ export function marginScale(pageSize: "A4" | "US Letter", marginMm: number): num
 
 /** Monthly PDF export cap per plan (admin settings). Returns an error message when it is reached. */
 async function exportLimitError(user: { userId: string; role?: string }, settings: ExportSettings): Promise<string | null> {
-  const limit = exportLimitFor(settings, user.role);
-  if (!limit) return null;
   try {
+    // The billing plan (FREE / PRO) set in the admin console picks the Pro limit too.
+    const account = await prisma.user.findUnique({ where: { id: user.userId }, select: { plan: true } });
+    const limit = exportLimitFor(settings, user.role, account?.plan);
+    if (!limit) return null;
     const used = await prisma.exportEvent.count({
       where: { userId: user.userId, format: "pdf", createdAt: { gte: startOfUtcMonth() } },
     });

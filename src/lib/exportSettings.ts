@@ -70,15 +70,18 @@ export async function saveExportSettings(value: ExportSettings): Promise<ExportS
   return clean;
 }
 
-/** Plan of an account for export limits. Admins are unlimited; there is no paid plan yet. */
-export function exportPlanOf(role: string | null | undefined): "admin" | "pro" | "free" {
+/**
+ * Plan of an account for export limits. Admins are unlimited. A "pro" role or the billing plan
+ * PRO (set in the admin console) uses the Pro limit; everyone else the Free limit.
+ */
+export function exportPlanOf(role: string | null | undefined, billingPlan?: string | null): "admin" | "pro" | "free" {
   if (role === "admin") return "admin";
-  if (role === "pro") return "pro";
+  if (role === "pro" || billingPlan === "PRO") return "pro";
   return "free";
 }
 
-export function exportLimitFor(settings: ExportSettings, role: string | null | undefined): number {
-  const plan = exportPlanOf(role);
+export function exportLimitFor(settings: ExportSettings, role: string | null | undefined, billingPlan?: string | null): number {
+  const plan = exportPlanOf(role, billingPlan);
   if (plan === "admin") return 0;
   return settings.maxExports[plan];
 }

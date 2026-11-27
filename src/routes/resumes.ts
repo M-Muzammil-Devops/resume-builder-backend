@@ -4,6 +4,7 @@ import { z } from "zod";
 import { prisma } from "../prisma";
 import { coverLetter } from "../ai/gemini";
 import { planSaveError } from "../lib/planAccess";
+import { resumeLimitError } from "./userDashboard";
 import { redactPublicContent } from "../lib/publicResume";
 import { publicError } from "../lib/httpErrors";
 import { storedResumeContent as storedContent, storedResumeDesign } from "../lib/resumeContent";
@@ -101,12 +102,9 @@ export async function resumeRoutes(app: FastifyInstance) {
     const invalid = designError(body.data.design) || photoUrlError(body.data.content);
     if (invalid) return reply.code(400).send({ error: invalid });
 
-    if (request.user.role !== "admin") {
-      const count = await prisma.resume.count({ where: { userId: request.user.userId } });
-      if (count >= 1) {
-        return reply.code(402).send({ error: "Free plan includes 1 resume. Upgrade to add another." });
-      }
-    }
+    // Free plan: the "Resumes a Free account can keep" admin setting; Pro and admins are unlimited.
+    const limited = await resumeLimitError(request.user);
+    if (limited) return reply.code(402).send({ error: limited });
     const denied = planSaveError(request.user.role, { sections: [] }, body.data);
     if (denied) return reply.code(402).send({ error: denied });
 

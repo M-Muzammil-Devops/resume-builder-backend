@@ -16,6 +16,7 @@ import { registerErrorHandler } from "./lib/httpErrors";
 import { authRoutes } from "./routes/auth";
 import { ssoRoutes } from "./routes/authSso";
 import { resumeRoutes } from "./routes/resumes";
+import { userDashboardRoutes } from "./routes/userDashboard";
 import { aiRoutes } from "./routes/ai";
 import { templateRoutes } from "./routes/templates";
 import { jobRoutes } from "./routes/jobs";
@@ -153,6 +154,7 @@ async function main() {
   // SSO (Google / Facebook) + email magic code. Buttons show per GET /auth/providers.
   await app.register(ssoRoutes);
   await app.register(resumeRoutes);
+  await app.register(userDashboardRoutes);
   await app.register(aiRoutes);
   await app.register(templateRoutes);
   await app.register(jobRoutes);
