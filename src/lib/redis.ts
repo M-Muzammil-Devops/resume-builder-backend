@@ -8,6 +8,7 @@ type RedisLike = {
   incr?(key: string): Promise<number>;
   expire?(key: string, seconds: number): Promise<unknown>;
   getdel?(key: string): Promise<string | null>;
+  ping?(): Promise<string>;
   quit(): Promise<unknown>;
 };
 
@@ -142,4 +143,19 @@ export function __setRedisClientForTests(fake: unknown) {
 
 export function redisStatus() {
   return { enabled: env.redisEnabled, active: isRedisActive(), reason: client ? "ok" : disabledReason };
+}
+
+/** Round-trip time of a Redis PING in ms, or null when Redis is off / not answering. */
+export async function redisPing(timeoutMs = 1500): Promise<number | null> {
+  if (!client?.ping) return null;
+  const started = Date.now();
+  try {
+    await Promise.race([
+      client.ping(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), timeoutMs)),
+    ]);
+    return Date.now() - started;
+  } catch {
+    return null;
+  }
 }

@@ -6,6 +6,7 @@ import { cacheDel, cacheDelPrefix, cacheGet, cacheSet, redisStatus } from "../li
 import { publicUploadUrl, rejectUpload, saveUpload, writePlaceholderPreview } from "../lib/uploads";
 import { env } from "../config/env";
 import { adminUserWhere } from "../lib/adminSearch";
+import { auditAdmin } from "../lib/adminAudit";
 
 const DEPARTMENTS = [
   "DevOps",
@@ -62,7 +63,22 @@ export async function adminRoutes(app: FastifyInstance) {
   app.addHook("onRequest", adminGuard(app));
 
   app.get("/me", async (request) => {
-    return { user: adminOf(request) };
+    const access = request.adminAccess;
+    return {
+      user: adminOf(request),
+      access: access
+        ? {
+            role: access.role,
+            source: access.source,
+            superAdmin: access.superAdmin,
+            canRead: access.canRead,
+            canWrite: access.canWrite,
+            canDelete: access.canDelete,
+            canBilling: access.canBilling,
+            canSystem: access.canSystem,
+          }
+        : null,
+    };
   });
 
   app.get("/stats", async (request) => {
@@ -92,7 +108,7 @@ export async function adminRoutes(app: FastifyInstance) {
       resumes,
       loginsToday,
     ] = await Promise.all([
-      prisma.user.count({ where: { role: "user" } }),
+      prisma.user.count({ where: { role: "user", status: { not: "DELETED" } } }),
       prisma.user.count({ where: { role: "user", createdAt: { gte: startOfDay } } }),
       prisma.user.count({ where: { role: "user", createdAt: { gte: startOfMonth } } }),
       prisma.user.count({ where: { role: "user", lastLoginAt: { gte: startOfDay } } }),
@@ -151,20 +167,26 @@ export async function adminRoutes(app: FastifyInstance) {
     return payload;
   });
 
+  /** Users list: search (email / name), plan + status filters, pagination. Soft-deleted users only with status=DELETED. */
   app.get("/users", async (request) => {
-
     const q = z
       .object({
         take: z.coerce.number().min(1).max(200).optional(),
         skip: z.coerce.number().min(0).optional(),
         search: z.string().max(200).optional(),
         q: z.string().max(200).optional(),
+        plan: z.enum(["all", "FREE", "PRO"]).optional(),
+        status: z.enum(["all", "ACTIVE", "SUSPENDED", "DELETED"]).optional(),
       })
       .parse(request.query);
 
     const take = q.take ?? 50;
     const skip = q.skip ?? 0;
-    const where = adminUserWhere(q.search ?? q.q);
+    const where = {
+      ...adminUserWhere(q.search ?? q.q),
+      ...(q.plan && q.plan !== "all" ? { plan: q.plan } : {}),
+      status: q.status && q.status !== "all" ? q.status : { not: "DELETED" },
+    };
     const [users, total] = await Promise.all([
       prisma.user.findMany({
         where,
@@ -175,33 +197,113 @@ export async function adminRoutes(app: FastifyInstance) {
           id: true,
           email: true,
           name: true,
+          role: true,
           location: true,
           country: true,
+          city: true,
+          plan: true,
+          status: true,
           createdAt: true,
           lastLoginAt: true,
+          emailVerifiedAt: true,
           _count: { select: { resumes: true } },
         },
       }),
       prisma.user.count({ where }),
     ]);
 
-    return { users, total, take, skip };
+    // Location fallback: the latest enriched sign-in (GeoIP) when the profile has no city / country.
+    const ids = users.filter((u) => !u.city || !u.country).map((u) => u.id);
+    const geo = new Map<string, { city: string | null; country: string | null; countryCode: string | null }>();
+    if (ids.length) {
+      const events = await prisma.loginEvent.findMany({
+        where: { userId: { in: ids }, OR: [{ country: { not: null } }, { city: { not: null } }] },
+        orderBy: { createdAt: "desc" },
+        select: { userId: true, city: true, country: true, countryCode: true },
+        take: 2000,
+      });
+      for (const e of events) if (!geo.has(e.userId)) geo.set(e.userId, e);
+    }
+    const rows = users.map((u) => {
+      const g = geo.get(u.id);
+      return {
+        ...u,
+        city: u.city || g?.city || null,
+        country: u.country || g?.country || null,
+        countryCode: g?.countryCode || null,
+        lastActiveAt: u.lastLoginAt,
+        resumes: u._count.resumes,
+      };
+    });
+
+    return { users: rows, total, take, skip };
   });
 
-  /** BUG-801: remove a user account (e.g. unverified test sign-ups). Admin accounts are protected. */
+  /** Suspend / re-activate a user. Suspending also signs them out everywhere (session epoch bump). */
+  app.patch("/users/:id/status", async (request, reply) => {
+    const admin = adminOf(request);
+    const { id } = z.object({ id: z.string().min(1).max(64) }).parse(request.params);
+    const body = z.object({ status: z.enum(["ACTIVE", "SUSPENDED"]) }).safeParse(request.body);
+    if (!body.success) return reply.code(400).send({ error: "Status must be ACTIVE or SUSPENDED" });
+    if (id === admin.id) return reply.code(400).send({ error: "You cannot change your own account here" });
+    const target = await prisma.user.findUnique({ where: { id }, select: { id: true, role: true, status: true, email: true } });
+    if (!target) return reply.code(404).send({ error: "User not found" });
+    if (target.role === "admin") return reply.code(403).send({ error: "Admin accounts cannot be suspended" });
+    if (target.status === "DELETED") return reply.code(409).send({ error: "This account was deleted" });
+    const next = body.data.status;
+    const user = await prisma.user.update({
+      where: { id },
+      data:
+        next === "SUSPENDED"
+          ? { status: "SUSPENDED", suspendedAt: new Date(), sessionEpoch: { increment: 1 } }
+          : { status: "ACTIVE", suspendedAt: null },
+      select: { id: true, status: true, suspendedAt: true },
+    });
+    await cacheDel("admin:stats:v1");
+    await auditAdmin(request, next === "SUSPENDED" ? "user.suspend" : "user.activate", "user", id, { email: target.email, from: target.status });
+    return { user };
+  });
+
+  /** Change a user's billing plan (FREE / PRO), e.g. a manual upgrade before payments are live. */
+  app.patch("/users/:id/plan", async (request, reply) => {
+    const { id } = z.object({ id: z.string().min(1).max(64) }).parse(request.params);
+    const body = z.object({ plan: z.enum(["FREE", "PRO"]) }).safeParse(request.body);
+    if (!body.success) return reply.code(400).send({ error: "Plan must be FREE or PRO" });
+    const target = await prisma.user.findUnique({ where: { id }, select: { id: true, plan: true, email: true, status: true } });
+    if (!target) return reply.code(404).send({ error: "User not found" });
+    if (target.status === "DELETED") return reply.code(409).send({ error: "This account was deleted" });
+    const user = await prisma.user.update({ where: { id }, data: { plan: body.data.plan }, select: { id: true, plan: true } });
+    await cacheDel("admin:stats:v1");
+    await auditAdmin(request, "user.plan", "user", id, { email: target.email, from: target.plan, to: body.data.plan });
+    return { user };
+  });
+
+  /**
+   * BUG-801 / v2: remove a user account. Default is a soft delete (status DELETED, signed out, hidden from lists,
+   * restorable by support). ?permanent=true removes the account and its data for good. Admin accounts are protected.
+   */
   app.delete("/users/:id", async (request, reply) => {
     const admin = adminOf(request);
     const parsed = z.object({ id: z.string().min(1).max(64) }).safeParse(request.params);
     if (!parsed.success) return reply.code(400).send({ error: "Invalid user id" });
+    const { permanent } = z.object({ permanent: z.enum(["true", "false"]).optional() }).parse(request.query);
     const { id } = parsed.data;
     if (id === admin.id) return reply.code(400).send({ error: "You cannot delete your own account here" });
-    const target = await prisma.user.findUnique({ where: { id }, select: { id: true, role: true } });
+    const target = await prisma.user.findUnique({ where: { id }, select: { id: true, role: true, email: true, status: true } });
     if (!target) return reply.code(404).send({ error: "User not found" });
     if (target.role === "admin") return reply.code(403).send({ error: "Admin accounts cannot be deleted" });
-    await prisma.user.delete({ where: { id } });
+    if (permanent === "true") {
+      await prisma.user.delete({ where: { id } });
+    } else {
+      await prisma.user.update({
+        where: { id },
+        data: { status: "DELETED", deletedAt: new Date(), sessionEpoch: { increment: 1 } },
+      });
+    }
     await cacheDel("admin:stats:v1");
-    request.log.info({ deletedUserId: id, admin: admin.email }, "user deleted by admin");
-    return { ok: true };
+    await auditAdmin(request, permanent === "true" ? "user.delete.permanent" : "user.delete", "user", id, { email: target.email, from: target.status });
+    request.log.info({ deletedUserId: id, admin: admin.email, permanent: permanent === "true" }, "user deleted by admin");
+    return { ok: true, permanent: permanent === "true" };
   });
   app.get("/templates", async () => {
     const rows = await prisma.landingTemplate.findMany({ orderBy: [{ sortOrder: "asc" }, { createdAt: "desc" }] });
@@ -294,6 +396,7 @@ export async function adminRoutes(app: FastifyInstance) {
       { templateId: row.id, department: row.department, admin: admin.email },
       "landing template uploaded"
     );
+    await auditAdmin(request, "template.upload", "landing-template", row.id, { name: row.name, department: row.department });
     return { template: mapLanding(row) };
   });
 
@@ -322,6 +425,7 @@ export async function adminRoutes(app: FastifyInstance) {
     await cacheDel("admin:stats:v1");
     await cacheDelPrefix(LANDING_TEMPLATES_CACHE_PREFIX);
     request.log.info({ templateId: id, admin: admin.email }, "landing template updated");
+    await auditAdmin(request, "template.landing.update", "landing-template", id, body);
     return { template: mapLanding(row) };
   });
 
@@ -334,6 +438,7 @@ export async function adminRoutes(app: FastifyInstance) {
     await cacheDel("admin:stats:v1");
     await cacheDelPrefix(LANDING_TEMPLATES_CACHE_PREFIX);
     request.log.info({ templateId: id, admin: admin.email }, "landing template deleted");
+    await auditAdmin(request, "template.landing.delete", "landing-template", id);
     return { ok: true };
   });
 }

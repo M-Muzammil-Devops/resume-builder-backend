@@ -2,6 +2,18 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { env } from "../config/env";
 import { hitLimit } from "../lib/loginGuard";
 import { mailConfigured, sendMail } from "../lib/mailer";
+import { prisma } from "../prisma";
+
+/** Admin Dashboard v2 "Leads": every accepted contact message is stored (best effort, never blocks the reply). */
+function storeLead(input: ContactInput & { ip: string; delivered: boolean }) {
+  try {
+    void prisma.contactMessage
+      .create({ data: { name: input.name, email: input.email, message: input.message, ip: input.ip.slice(0, 64), delivered: input.delivered } })
+      .catch(() => undefined);
+  } catch {
+    /* no database (unit tests) */
+  }
+}
 
 /** Public contact form (/contact page) → one email to ADMIN_EMAIL through the existing SMTP mailer. */
 export const CONTACT_LIMIT_PER_HOUR = 5;
@@ -81,6 +93,7 @@ export async function contactRoutes(
     if (!check.ok) return reply.code(400).send({ error: check.message, field: check.field, code: "BAD_CONTACT" });
     if (!configured()) {
       request.log.warn("contact form: SMTP is not configured");
+      if (!opts.send) storeLead({ ...check.value, ip, delivered: false });
       return reply.code(503).send({ error: "Messages can't be delivered right now. Please try again later.", code: "MAIL_UNAVAILABLE" });
     }
 
@@ -102,9 +115,11 @@ export async function contactRoutes(
     try {
       const res = await send({ to: to(), subject, text, html });
       request.log.info({ delivered: res.delivered, messageId: res.messageId, smtp: res.response }, "contact email attempted");
+      if (!opts.send) storeLead({ ...check.value, ip, delivered: res.delivered });
       if (!res.delivered) return reply.code(503).send({ error: "Messages can't be delivered right now. Please try again later.", code: "MAIL_UNAVAILABLE" });
     } catch (err) {
       request.log.error({ err: err instanceof Error ? err.message : String(err) }, "contact form: send failed");
+      if (!opts.send) storeLead({ ...check.value, ip, delivered: false });
       return reply.code(502).send({ error: "We couldn't send your message. Please try again in a few minutes.", code: "MAIL_FAILED" });
     }
     return reply.code(202).send({ ok: true });

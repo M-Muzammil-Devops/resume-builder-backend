@@ -22,7 +22,7 @@ import { mailErrorMeta, resetEmail, verifyEmail } from "../lib/emailTemplates";
 import { PASSWORD_HINT, passwordError } from "../lib/passwordPolicy";
 import { resolvePublicAppUrl } from "../lib/publicUrl";
 import { joinUrl } from "../lib/urls";
-import { isAdminRole } from "../lib/adminAuth";
+import { hasAdminAccess } from "../lib/adminAuth";
 
 const locationFields = {
   location: z.string().max(120).optional(),
@@ -169,7 +169,17 @@ async function sendReset(request: FastifyRequest, user: { id: string; email: str
   }
 }
 
-export async function sessionFor(app: FastifyInstance, user: { id: string; email: string; role: string; name: string | null; location?: string | null; country?: string | null; sessionEpoch?: number }) {
+/** Thrown for suspended / deleted accounts; the error handler turns it into a 403 with this message. */
+export function accountBlockedError(status: string) {
+  return Object.assign(
+    new Error(status === "SUSPENDED" ? "This account is suspended. Contact support to restore access." : "This account has been closed."),
+    { statusCode: 403 }
+  );
+}
+
+export async function sessionFor(app: FastifyInstance, user: { id: string; email: string; role: string; name: string | null; location?: string | null; country?: string | null; sessionEpoch?: number; status?: string }) {
+  const status = user.status ?? (await prisma.user.findUnique({ where: { id: user.id }, select: { status: true } }))?.status ?? "ACTIVE";
+  if (status !== "ACTIVE") throw accountBlockedError(status);
   const jti = randomBytes(9).toString("base64url");
   const token = app.jwt.sign(
     { userId: user.id, email: user.email, role: user.role, jti, epoch: user.sessionEpoch ?? 0 },
@@ -395,7 +405,13 @@ export async function authRoutes(app: FastifyInstance) {
       return reply.code(401).send({ error: "Invalid credentials" });
     }
 
-    if (adminOnly && !isAdminRole(user.role)) {
+    if (user.status !== "ACTIVE") {
+      clearLoginFailures(email);
+      request.log.warn({ userId: user.id, status: user.status }, "login refused: account not active");
+      return reply.code(403).send({ error: accountBlockedError(user.status).message, code: `ACCOUNT_${user.status}` });
+    }
+
+    if (adminOnly && !(await hasAdminAccess(user))) {
       clearLoginFailures(email);
       request.log.warn({ userId: user.id }, "admin login refused: not an admin");
       return reply.code(403).send({
@@ -451,8 +467,8 @@ export async function authRoutes(app: FastifyInstance) {
 
   /** Re-issue the admin console cookie for the current (e.g. refreshed) admin access token. */
   app.post("/auth/admin/session", { preHandler: [app.authenticate] }, async (request, reply) => {
-    const user = await prisma.user.findUnique({ where: { id: request.user.userId }, select: { role: true } });
-    if (!user || !isAdminRole(user.role)) {
+    const user = await prisma.user.findUnique({ where: { id: request.user.userId }, select: { id: true, email: true, role: true, status: true } });
+    if (!user || !(await hasAdminAccess(user))) {
       reply.header("Set-Cookie", adminCookie(null));
       return reply.code(403).send({ error: "Admin access required" });
     }

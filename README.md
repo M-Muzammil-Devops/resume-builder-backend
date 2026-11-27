@@ -384,3 +384,26 @@ resumes without one; the watermark is added for non-admin accounts when enabled;
 to say they are collected for security and account monitoring, how long they are kept, and that DB-IP
 is used offline (attribution is shown in the admin page). Page views are stored only with analytics
 consent and Google Analytics loads only after that consent.
+
+## Admin Dashboard v2 (overview, health, billing, team)
+
+All routes sit under `/admin` behind `adminGuard` (session + admin access + per-route permission).
+
+| Endpoint | Permission | What it returns |
+|---|---|---|
+| `GET /admin/overview?range=today\|7d\|30d\|90d` | Read | KPIs (Total / New / Active users, pages, leads, Free vs Pro, resumes, PDF exports, audio jobs, error rate), daily trend, 24-hour peak hours (PKT), devices, geography, top pages, latest leads |
+| `GET /admin/health` | System | Backend uptime, Postgres + Redis latency, disk %, RAM, SMTP login check (cached 10 min) |
+| `GET /admin/users?search=&plan=&status=` | Read | Users with location, plan, status, last active |
+| `PATCH /admin/users/:id/status` · `/plan` | Write | Suspend / activate (signs the user out) · Free / Pro |
+| `DELETE /admin/users/:id[?permanent=true]` | Delete | Soft delete (status `DELETED`) or permanent removal |
+| `GET /admin/leads` · `/admin/pages` · `/admin/consents` | Read / System | Contact messages + sign-ups · page views per page · cookie choices |
+| `GET /admin/billing` · `/admin/billing/invoices/:id/pdf` | Billing | Revenue, available balance, pending payout, Pro subs, invoices · invoice PDF |
+| `GET/POST/PATCH/DELETE /admin/team…` | System (read) · Super Admin (write) | Manage Team members and their Read / Write / Delete / Billing / System permissions |
+
+- **Roles:** `SUPER_ADMIN` (all), `OPERATIONS` (read, write, delete, system), `SUPPORT` (read, write), `ANALYST` (read), `CUSTOM` (pick per member). The owner account (`role = admin`) is always Super Admin and cannot be changed or removed.
+- **Team sign-in:** a member signs in at `/admin/login` with the invited email (they need a normal account first). An `INVITED` row turns `ACTIVE` on first use.
+- **Suspended / deleted users** cannot sign in, refresh, or call the API (checked in `authenticate`).
+- **Error rate** comes from `RequestStat` (API responses counted per hour, flushed every minute).
+- **Leads** are stored in `ContactMessage` for every accepted contact-form message (the email is still sent).
+- **Invoices** stay empty until a payment provider (Paddle / Safepay) writes them; the dashboard shows real zeros, never sample revenue.
+- Migration: `20261127120000_admin_dashboard_v2` (additive only).

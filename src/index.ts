@@ -28,6 +28,8 @@ import { adminActivityRoutes, trackingRoutes } from "./routes/activity";
 import { adminPdfRoutes, publicTemplateSettingsRoutes } from "./routes/adminPdf";
 import { audioRoutes } from "./routes/audio";
 import { contactRoutes } from "./routes/contact";
+import { adminV2Routes } from "./routes/adminV2";
+import { countRequest, startRequestStats, stopRequestStats } from "./lib/requestStats";
 import { AudioService } from "./lib/audio/service";
 import { loadAudioConfig } from "./lib/audio/config";
 
@@ -112,10 +114,15 @@ async function main() {
     }
     const user = await prisma.user.findUnique({
       where: { id: request.user.userId },
-      select: { sessionEpoch: true },
+      select: { sessionEpoch: true, status: true },
     });
     if (!user || user.sessionEpoch !== (request.user.epoch ?? 0)) {
       reply.code(401).send({ error: "Unauthorized" });
+      return;
+    }
+    // Admin Dashboard v2: suspended / deleted accounts lose API access at once.
+    if (user.status !== "ACTIVE") {
+      reply.code(401).send({ error: "Unauthorized", code: user.status === "SUSPENDED" ? "ACCOUNT_SUSPENDED" : "ACCOUNT_CLOSED" });
     }
   });
 
@@ -127,6 +134,7 @@ async function main() {
   });
 
   app.addHook("onResponse", async (request, reply) => {
+    countRequest(reply.statusCode, request.url);
     request.log.info(
       {
         method: request.method,
@@ -158,6 +166,8 @@ async function main() {
   // Users & Activity, consent audit, page views, PDF/template control (admin routes are guarded).
   await app.register(adminActivityRoutes, { prefix: "/admin" });
   await app.register(adminPdfRoutes, { prefix: "/admin" });
+  // Admin Dashboard v2: overview charts, system health, billing, manage team (RBAC).
+  await app.register(adminV2Routes, { prefix: "/admin" });
   await app.register(trackingRoutes);
   await app.register(publicTemplateSettingsRoutes);
   await app.register(contactRoutes);
@@ -172,6 +182,9 @@ async function main() {
   }
   app.addHook("onClose", async () => audio.close());
   await app.register(audioRoutes, { service: audio });
+
+  startRequestStats();
+  app.addHook("onClose", async () => stopRequestStats());
 
   await app.listen({ port: env.apiPort, host: "0.0.0.0" });
   app.log.info(

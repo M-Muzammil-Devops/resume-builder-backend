@@ -2,6 +2,7 @@ import { createWriteStream } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
+import { prisma } from "../prisma";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { AudioError, type AudioJob, type AudioService } from "../lib/audio/service";
 import { makePreviewSigner, PREVIEW_TTL_SECONDS, type PreviewTrack } from "../lib/audio/previewToken";
@@ -247,6 +248,8 @@ export async function audioRoutes(app: FastifyInstance, opts: { service: AudioBa
       reply.header("X-RateLimit-Remaining", String(limit - accepted.hit(userId, id)));
     }
     const job = svc.enqueue({ id, dir, userId, name, sizeBytes, info, mode, strength, output });
+    // Admin Dashboard v2: audio job usage counter (best effort).
+    void prisma.usageEvent.create({ data: { kind: "audio_job", userId } }).catch(() => undefined);
     request.log.info({ jobId: id, userId, codec: info.codec, container: info.container, duration: info.duration, sizeBytes, mode }, "audio job queued");
     return reply.code(202).send({ jobId: job.id, status: job.status, position: svc.position(job), job: svc.publicJob(job) });
   });
