@@ -1,3 +1,4 @@
+import { getAdminSettings } from "./lib/appSettings";
 import "dotenv/config";
 import Fastify from "fastify";
 import cors from "@fastify/cors";
@@ -171,6 +172,16 @@ async function main() {
   await app.register(trackingRoutes);
   await app.register(publicTemplateSettingsRoutes);
   await app.register(contactRoutes);
+  // Public site status (Admin Settings): brand name, sign-ups open, maintenance banner. No secrets.
+  app.get("/site/status", async (_request, reply) => {
+    const st = await getAdminSettings();
+    reply.header("Cache-Control", "public, max-age=30");
+    return {
+      siteName: st.siteName,
+      registrationOpen: st.registrationOpen,
+      maintenance: st.maintenance.enabled ? { enabled: true, message: st.maintenance.message } : { enabled: false, message: "" },
+    };
+  });
 
   // Audio Noise Remover (DeepFilterNet3 worker, ffmpeg fallbacks). Temp files live
   // outside uploads/ and are deleted after 1 hour. A missing ffmpeg only disables this tool.

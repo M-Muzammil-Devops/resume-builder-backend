@@ -11,7 +11,7 @@ import { BLOCKED_EXTENSIONS, cleanUploadName, contentDisposition, extOf, parseMo
 /** The subset of AudioService the routes use (tests pass a fake). */
 export type AudioBackend = Pick<
   AudioService,
-  "capabilities" | "assertCanAccept" | "activeJobFor" | "newJobDir" | "probe" | "enqueue" | "publicJob" | "remove" | "filePath" | "stream" | "jobs" | "position" | "onQuotaRefund"
+  "capabilities" | "assertCanAccept" | "activeJobFor" | "newJobDir" | "probe" | "enqueue" | "publicJob" | "remove" | "filePath" | "stream" | "jobs" | "position" | "onQuotaRefund" | "onJobChange"
 > & { cfg: { maxBytes: number; uploadsPerHour: number } };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -60,6 +60,50 @@ function makeWindow(windowMs: number) {
   };
 }
 
+const JOB_STATUS: Record<string, string> = { queued: "queued", done: "done", failed: "failed", canceled: "canceled" };
+const emailCache = new Map<string, string | null>();
+
+/** Upserts the admin log row for a job (no file names or contents are stored). */
+export async function logAudioJob(job: AudioJob): Promise<void> {
+  try {
+    const status = JOB_STATUS[job.status] ?? "processing";
+    const finished = status === "done" || status === "failed" || status === "canceled";
+    const durationSec = Number.isFinite(job.input?.duration) ? Number(job.input.duration) : null;
+    const data = {
+      status,
+      errorCode: job.error?.code ?? null,
+      engine: job.result?.engine ?? null,
+      processingMs: job.result?.processingMs != null ? Math.round(job.result.processingMs) : null,
+      finishedAt: finished ? new Date(job.finishedAt ?? Date.now()) : null,
+    };
+    let userEmail = emailCache.get(job.userId);
+    if (userEmail === undefined) {
+      userEmail = (await prisma.user.findUnique({ where: { id: job.userId }, select: { email: true } }).catch(() => null))?.email ?? null;
+      if (emailCache.size > 500) emailCache.clear();
+      emailCache.set(job.userId, userEmail);
+    }
+    await prisma.audioJob.upsert({
+      where: { id: job.id },
+      update: data,
+      create: {
+        id: job.id,
+        userId: job.userId,
+        userEmail,
+        mode: String(job.mode),
+        strength: Number.isFinite(job.strength) ? Math.round(job.strength) : null,
+        outputFormat: job.spec?.ext ?? String(job.output ?? ""),
+        inputExt: extOf(job.input?.name ?? "").replace(/^\./, "").slice(0, 12) || null,
+        sizeBytes: Math.min(2_147_483_647, Math.max(0, Math.round(job.input?.sizeBytes ?? 0))),
+        durationSec,
+        createdAt: new Date(job.createdAt || Date.now()),
+        ...data,
+      },
+    });
+  } catch {
+    /* table missing or DB busy: the job itself is unaffected */
+  }
+}
+
 /** Round 27: roles that skip the hourly audio quota (role is read from the database, never the JWT). */
 export const QUOTA_EXEMPT_ROLES = new Set(["admin", "owner"]);
 export function isQuotaExemptRole(role: string | null | undefined): boolean {
@@ -105,6 +149,8 @@ export async function audioRoutes(app: FastifyInstance, opts: { service: AudioBa
   svc.onQuotaRefund = (job) => {
     accepted.refund(job.userId, job.id);
   };
+  // Admin job log (AudioJob table): one row per job, updated on every status change. Never blocks a job.
+  svc.onJobChange = (job) => void logAudioJob(job);
   // Admin / owner bypass, cached 60 s per user; a lookup error means "not exempt".
   const exemptLookup = opts.quotaExempt ?? roleIsExempt;
   const exemptCache = new Map<string, { v: boolean; exp: number }>();

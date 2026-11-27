@@ -109,6 +109,8 @@ export class AudioService {
    * server) so the routes give its hourly-quota slot back. Only completed jobs keep counting.
    */
   onQuotaRefund?: (job: AudioJob) => void;
+  /** Called after each status change (queued, processing steps, done, failed, canceled); used for the admin job log. */
+  onJobChange?: (job: AudioJob) => void;
   private queue: string[] = [];
   private running: string | null = null;
   private encoders = new Set<string>();
@@ -134,6 +136,7 @@ export class AudioService {
     const now = Date.now();
     if (!force && now - (this.lastSaved.get(job.id) ?? 0) < 1000) return Promise.resolve();
     this.lastSaved.set(job.id, now);
+    if (force) this.notifyChange(job);
     return this.store.save(toStored(job)).catch((err) => this.log.warn({ jobId: job.id, err: String(err).slice(0, 200) }, "audio job save failed"));
   }
 
@@ -481,6 +484,7 @@ export class AudioService {
       job.status = "canceled";
       job.step = STEP_LABEL.canceled;
       if (!wasCanceled) this.refundQuota(job);
+      this.notifyChange(job);
     }
     job.abort.abort();
     this.jobs.delete(job.id);
@@ -521,6 +525,14 @@ export class AudioService {
       }
       if (this.jobs.has(job.id)) await this.persist(job);
       void this.pump();
+    }
+  }
+
+  private notifyChange(job: AudioJob) {
+    try {
+      this.onJobChange?.(job);
+    } catch {
+      /* the job log must never break the pipeline */
     }
   }
 

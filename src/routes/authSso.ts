@@ -1,3 +1,4 @@
+import { registrationOpen } from "../lib/appSettings";
 import { randomBytes } from "crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import bcrypt from "bcryptjs";
@@ -123,7 +124,9 @@ async function userForVerifiedEmail(
     }
     return { user: existing, created: false };
   }
+  // Admin Settings: when new sign-ups are off, only existing accounts can sign in.
   if (!allowCreate) return { user: null, created: false };
+  if (!(await registrationOpen())) return { user: null, created: false, closed: true };
   const user = await prisma.user.create({
     data: {
       email,
@@ -261,7 +264,9 @@ export async function ssoRoutes(app: FastifyInstance) {
       await prisma.oAuthAccount.update({ where: { id: linked.id }, data: { lastUsedAt: new Date() } });
     } else {
       if (!profile.email || !profile.emailVerified) return failRedirect(request, reply, "email");
-      const { user } = await userForVerifiedEmail(request, normalizeEmail(profile.email), profile.name, true);
+      const found = await userForVerifiedEmail(request, normalizeEmail(profile.email), profile.name, true);
+      if ("closed" in found && found.closed) return failRedirect(request, reply, "registration_closed");
+      const user = found.user;
       if (!user) return failRedirect(request, reply, "email");
       await prisma.oAuthAccount.create({
         data: { provider, providerUserId: profile.providerUserId, userId: user.id, email: profile.email },
@@ -372,7 +377,11 @@ export async function ssoRoutes(app: FastifyInstance) {
     await ephDel(`auth:magic:tries:${emailKey}`);
     if (!taken || taken.h !== row.h) return reply.code(400).send({ error: invalid });
 
-    const { user, created } = await userForVerifiedEmail(request, email, row.name || "", row.intent === "signup");
+    const found = await userForVerifiedEmail(request, email, row.name || "", row.intent === "signup");
+    if ("closed" in found && found.closed) {
+      return reply.code(403).send({ error: "New sign-ups are paused right now. Please try again later.", code: "REGISTRATION_CLOSED" });
+    }
+    const { user, created } = found;
     if (!user) return reply.code(400).send({ error: invalid });
     request.log.info({ userId: user.id, created }, "magic code sign-in");
     const session = await finishLogin(app, request, user);

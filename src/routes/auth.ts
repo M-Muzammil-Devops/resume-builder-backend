@@ -1,3 +1,4 @@
+import { registrationOpen } from "../lib/appSettings";
 import { randomBytes } from "crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import bcrypt from "bcryptjs";
@@ -234,6 +235,9 @@ export async function authRoutes(app: FastifyInstance) {
       return reply.code(409).send({ error: "Email already registered" });
     }
 
+    if (!(await registrationOpen())) {
+      return reply.code(403).send({ error: "New sign-ups are paused right now. Please try again later.", code: "REGISTRATION_CLOSED" });
+    }
     const passwordHash = await bcrypt.hash(body.password, 10);
     const user = await prisma.user.create({
       data: {

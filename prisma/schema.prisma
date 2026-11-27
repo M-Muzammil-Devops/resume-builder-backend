@@ -375,3 +375,30 @@ model RequestStat {
   errors    Int      @default(0)
   updatedAt DateTime @updatedAt
 }
+
+/// One noise-remover job (row written when the job is queued, updated when it ends). Files are never stored here.
+model AudioJob {
+  id           String    @id
+  userId       String?
+  userEmail    String?
+  /// voice | music | ... (the mode the user picked)
+  mode         String
+  strength     Int?
+  outputFormat String?
+  /// file extension of the upload (the file name itself is not kept)
+  inputExt     String?
+  sizeBytes    Int       @default(0)
+  durationSec  Float?
+  /// queued | processing | done | failed | canceled
+  status       String    @default("queued")
+  errorCode    String?
+  engine       String?
+  processingMs Int?
+  createdAt    DateTime  @default(now())
+  finishedAt   DateTime?
+  updatedAt    DateTime  @updatedAt
+
+  @@index([createdAt])
+  @@index([status, createdAt])
+  @@index([userId])
+}

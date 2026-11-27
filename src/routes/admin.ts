@@ -1,3 +1,4 @@
+import { lookupIp } from "../lib/geoip";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "../prisma";
@@ -212,25 +213,45 @@ export async function adminRoutes(app: FastifyInstance) {
       prisma.user.count({ where }),
     ]);
 
-    // Location fallback: the latest enriched sign-in (GeoIP) when the profile has no city / country.
+    // Location: profile city / country, else the latest sign-in with a GeoIP result (looked up now when
+    // the sign-in was not enriched yet), else the free-text profile location. Found values are saved back.
     const ids = users.filter((u) => !u.city || !u.country).map((u) => u.id);
     const geo = new Map<string, { city: string | null; country: string | null; countryCode: string | null }>();
     if (ids.length) {
       const events = await prisma.loginEvent.findMany({
-        where: { userId: { in: ids }, OR: [{ country: { not: null } }, { city: { not: null } }] },
+        where: { userId: { in: ids }, OR: [{ country: { not: null } }, { city: { not: null } }, { ip: { not: null } }] },
         orderBy: { createdAt: "desc" },
-        select: { userId: true, city: true, country: true, countryCode: true },
+        select: { userId: true, ip: true, city: true, country: true, countryCode: true },
         take: 2000,
       });
-      for (const e of events) if (!geo.has(e.userId)) geo.set(e.userId, e);
+      let lookups = 0;
+      for (const e of events) {
+        if (geo.has(e.userId)) continue;
+        if (e.country || e.city) {
+          geo.set(e.userId, e);
+        } else if (e.ip && lookups < 50) {
+          lookups += 1;
+          const g = await lookupIp(e.ip).catch(() => null);
+          if (g && (g.country || g.city)) geo.set(e.userId, { city: g.city, country: g.country, countryCode: g.countryCode });
+        }
+      }
     }
     const rows = users.map((u) => {
       const g = geo.get(u.id);
+      const city = u.city || g?.city || null;
+      const country = u.country || g?.country || null;
+      if (g && ((!u.city && g.city) || (!u.country && g.country))) {
+        void prisma.user
+          .update({ where: { id: u.id }, data: { ...(!u.city && g.city ? { city: g.city } : {}), ...(!u.country && g.country ? { country: g.country } : {}) } })
+          .catch(() => undefined);
+      }
+      const label = [city, country].filter(Boolean).join(", ") || (u.location || "").trim() || null;
       return {
         ...u,
-        city: u.city || g?.city || null,
-        country: u.country || g?.country || null,
+        city,
+        country,
         countryCode: g?.countryCode || null,
+        locationLabel: label,
         lastActiveAt: u.lastLoginAt,
         resumes: u._count.resumes,
       };
@@ -294,6 +315,8 @@ export async function adminRoutes(app: FastifyInstance) {
     if (target.role === "admin") return reply.code(403).send({ error: "Admin accounts cannot be deleted" });
     if (permanent === "true") {
       await prisma.user.delete({ where: { id } });
+      // The audio job log keeps counts only: drop who ran the jobs.
+      await prisma.audioJob.updateMany({ where: { userId: id }, data: { userId: null, userEmail: null } }).catch(() => undefined);
     } else {
       await prisma.user.update({
         where: { id },

@@ -399,6 +399,9 @@ All routes sit under `/admin` behind `adminGuard` (session + admin access + per-
 | `GET /admin/leads` · `/admin/pages` · `/admin/consents` | Read / System | Contact messages + sign-ups · page views per page · cookie choices |
 | `GET /admin/billing` · `/admin/billing/invoices/:id/pdf` | Billing | Revenue, available balance, pending payout, Pro subs, invoices · invoice PDF |
 | `GET/POST/PATCH/DELETE /admin/team…` | System (read) · Super Admin (write) | Manage Team members and their Read / Write / Delete / Billing / System permissions |
+| `GET /admin/audio-jobs?range=&status=&search=&take=&skip=` | Read | Noise Remover jobs (user email, mode, length, size, status, time) + totals: jobs, completed, failed, minutes processed, jobs in range |
+| `GET /admin/settings` · `PATCH /admin/settings` | Read · System | Admin Settings (below) + read-only integration status; every change is written to the audit log |
+| `GET /site/status` (public) | — | Brand name, sign-ups open, maintenance banner (no secrets) |
 
 - **Roles:** `SUPER_ADMIN` (all), `OPERATIONS` (read, write, delete, system), `SUPPORT` (read, write), `ANALYST` (read), `CUSTOM` (pick per member). The owner account (`role = admin`) is always Super Admin and cannot be changed or removed.
 - **Team sign-in:** a member signs in at `/admin/login` with the invited email (they need a normal account first). An `INVITED` row turns `ACTIVE` on first use.
@@ -406,4 +409,9 @@ All routes sit under `/admin` behind `adminGuard` (session + admin access + per-
 - **Error rate** comes from `RequestStat` (API responses counted per hour, flushed every minute).
 - **Leads** are stored in `ContactMessage` for every accepted contact-form message (the email is still sent).
 - **Invoices** stay empty until a payment provider (Paddle / Safepay) writes them; the dashboard shows real zeros, never sample revenue.
-- Migration: `20261127120000_admin_dashboard_v2` (additive only).
+- **Audio jobs:** the `AudioJob` table gets one row per noise-remover job (written when it is queued, updated on every status change). Only the email, mode, length, size, formats and status are kept, never the file or its name. A permanent user delete removes the email from that user's rows.
+- **Settings** (AppSetting key `admin`): site name, support email, Free limits (audio minutes per month, max resumes), allow new sign-ups, maintenance mode + message. The Free PDF export limit and the Free watermark are the same live values as PDF & Templates → export settings (key `export`), so there is one source of truth.
+  - *Allow new sign-ups* off: email register, Google / Facebook and magic-code sign-ups get "New sign-ups are paused"; existing accounts still sign in.
+  - *Maintenance mode* on: a banner with the message shows at the top of the public site (the admin console is not affected; the site keeps working).
+  - Integrations (SMTP, Google, Facebook, Google Analytics) show "Configured" / "Not configured" from the server env only.
+- Migrations: `20261127120000_admin_dashboard_v2`, `20261127150000_audio_jobs` (both additive only).

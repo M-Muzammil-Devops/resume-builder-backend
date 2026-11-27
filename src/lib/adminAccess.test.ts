@@ -40,3 +40,9 @@ test("dashboard time helpers use PKT (UTC+5) days and find peak / quiet windows"
   assert.equal(w.peak.label, "9 PM – 11 PM");
   assert.equal(w.quiet.from, 2);
 });
+
+test("settings: read with canRead, change with canSystem", () => {
+  assert.deepEqual(permissionFor("GET", "/admin/settings"), ["canRead"]);
+  assert.deepEqual(permissionFor("PATCH", "/admin/settings"), ["canRead", "canSystem"]);
+  assert.deepEqual(permissionFor("GET", "/admin/audio-jobs"), ["canRead"]);
+});

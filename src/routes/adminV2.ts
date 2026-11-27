@@ -7,12 +7,13 @@ import { prisma } from "../prisma";
 import { adminGuard, adminOf } from "../lib/adminAuth";
 import { auditAdmin } from "../lib/adminAudit";
 import { TEAM_ROLES, isTeamRole, roleDefaults, type TeamRole } from "../lib/adminAccess";
-import { cacheGet, cacheSet, redisPing, redisStatus } from "../lib/redis";
+import { cacheDel, cacheGet, cacheSet, redisPing, redisStatus } from "../lib/redis";
 import { verifyMail, sendMail, mailConfigured } from "../lib/mailer";
 import { pendingSince } from "../lib/requestStats";
 import { ALL_SITE_PAGES } from "../lib/sitePages";
 import { buildPdf } from "../lib/simplePdf";
 import { env } from "../config/env";
+import { adminSettingsSchema, getAdminSettings, integrationStatus, saveAdminSettings } from "../lib/appSettings";
 
 /** The owner's time zone (Asia/Karachi, UTC+5, no DST). Days and hours in the dashboard are PKT. */
 export const PKT_OFFSET_MS = 5 * 3_600_000;
@@ -387,10 +388,15 @@ export async function adminV2Routes(app: FastifyInstance) {
     const { range } = z.object({ range: z.enum(["today", "7d", "30d", "90d"]).optional() }).parse(request.query);
     const r: Range = range ?? "7d";
     const key = `admin:overview:v2:${r}`;
-    const cached = await cacheGet<unknown>(key);
-    if (cached) return cached;
-    const payload = await overview(r);
-    await cacheSet(key, payload, 60);
+    let payload = await cacheGet<Awaited<ReturnType<typeof overview>>>(key);
+    if (!payload) {
+      payload = await overview(r);
+      await cacheSet(key, payload, 60);
+    }
+    // Total users is all-time and must match on every range: read it fresh (cheap indexed count),
+    // never from a range's 60 s cache.
+    const totalUsers = await prisma.user.count({ where: { role: "user", status: { not: "DELETED" } } }).catch(() => null);
+    if (totalUsers != null) payload = { ...payload, kpis: { ...payload.kpis, totalUsers } };
     return payload;
   });
 
@@ -648,5 +654,109 @@ export async function adminV2Routes(app: FastifyInstance) {
     await prisma.adminTeamMember.delete({ where: { id } });
     await auditAdmin(request, "team.remove", "team", id, { email: member.email, role: member.role });
     return { ok: true };
+  });
+
+  // ---- Audio jobs (noise remover) -----------------------------------------
+  app.get("/audio-jobs", async (request) => {
+    const q = z
+      .object({
+        range: z.enum(["today", "7d", "30d", "90d", "all"]).optional(),
+        status: z.enum(["all", "queued", "processing", "done", "failed", "canceled"]).optional(),
+        search: z.string().max(200).optional(),
+        take: z.coerce.number().int().min(1).max(100).optional(),
+        skip: z.coerce.number().int().min(0).max(100000).optional(),
+      })
+      .parse(request.query);
+    const range = q.range ?? "30d";
+    const take = q.take ?? 25;
+    const skip = q.skip ?? 0;
+    const since = range === "all" ? null : rangeStart(range);
+    const term = (q.search ?? "").trim();
+    const where: Prisma.AudioJobWhereInput = {
+      ...(since ? { createdAt: { gte: since } } : {}),
+      ...(q.status && q.status !== "all" ? { status: q.status } : {}),
+      ...(term
+        ? {
+            OR: [
+              { userEmail: { contains: term, mode: "insensitive" } },
+              { id: { startsWith: term.toLowerCase() } },
+              { mode: { contains: term, mode: "insensitive" } },
+            ],
+          }
+        : {}),
+    };
+    const [rows, filtered, total, byStatus, minutes, inRange, first] = await Promise.all([
+      prisma.audioJob.findMany({ where, orderBy: { createdAt: "desc" }, take, skip }),
+      prisma.audioJob.count({ where }),
+      prisma.audioJob.count(),
+      prisma.audioJob.groupBy({ by: ["status"], _count: { _all: true } }),
+      prisma.audioJob.aggregate({ where: { status: "done" }, _sum: { durationSec: true } }),
+      since ? prisma.audioJob.count({ where: { createdAt: { gte: since } } }) : prisma.audioJob.count(),
+      prisma.audioJob.findFirst({ orderBy: { createdAt: "asc" }, select: { createdAt: true } }),
+    ]);
+    // Jobs from before the job log existed (only counted, no details).
+    const untracked = await prisma.usageEvent
+      .count({ where: { kind: "audio_job", ...(first ? { createdAt: { lt: first.createdAt } } : {}) } })
+      .catch(() => 0);
+    const count = (st: string) => byStatus.find((b) => b.status === st)?._count._all ?? 0;
+    return {
+      range,
+      summary: {
+        total,
+        completed: count("done"),
+        failed: count("failed"),
+        canceled: count("canceled"),
+        active: count("queued") + count("processing"),
+        minutesProcessed: Math.round(((minutes._sum.durationSec ?? 0) / 60) * 10) / 10,
+        inRange,
+        untracked,
+      },
+      jobs: rows.map((j) => ({
+        id: j.id,
+        userId: j.userId,
+        user: j.userEmail || null,
+        mode: j.mode,
+        strength: j.strength,
+        outputFormat: j.outputFormat,
+        inputExt: j.inputExt,
+        sizeBytes: j.sizeBytes,
+        durationSec: j.durationSec,
+        status: j.status,
+        errorCode: j.errorCode,
+        engine: j.engine,
+        processingMs: j.processingMs,
+        createdAt: j.createdAt,
+        finishedAt: j.finishedAt,
+      })),
+      total: filtered,
+      take,
+      skip,
+    };
+  });
+
+  // ---- Settings -------------------------------------------------------------
+  app.get("/settings", async () => ({ settings: await getAdminSettings(true), integrations: integrationStatus() }));
+
+  app.patch("/settings", async (request, reply) => {
+    const parsed = adminSettingsSchema.safeParse(request.body);
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      return reply.code(400).send({ error: `${issue?.path.join(".") || "settings"}: ${issue?.message || "invalid value"}` });
+    }
+    const before = await getAdminSettings(true);
+    const settings = await saveAdminSettings(parsed.data);
+    const changed: Record<string, { from: unknown; to: unknown }> = {};
+    const flat = (o: Record<string, unknown>, pre = ""): Record<string, unknown> =>
+      Object.entries(o).reduce<Record<string, unknown>>((acc, [k, v]) => {
+        if (v && typeof v === "object" && !Array.isArray(v)) Object.assign(acc, flat(v as Record<string, unknown>, `${pre}${k}.`));
+        else acc[`${pre}${k}`] = v;
+        return acc;
+      }, {});
+    const a = flat(before as unknown as Record<string, unknown>);
+    const b = flat(settings as unknown as Record<string, unknown>);
+    for (const k of Object.keys(b)) if (a[k] !== b[k]) changed[k] = { from: a[k], to: b[k] };
+    await auditAdmin(request, "settings.update", "settings", "admin", { changed });
+    await cacheDel("admin:stats:v1").catch(() => undefined);
+    return { settings, integrations: integrationStatus() };
   });
 }

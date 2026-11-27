@@ -85,7 +85,8 @@ export type PermissionNeed = keyof AdminPermissions | "superAdmin" | null;
 
 /**
  * Permission a request to the /admin API needs, from its method and path (path is after /admin).
- * Billing pages need canBilling; system pages (health, audit log, settings, consents) need canSystem;
+ * Billing pages need canBilling; system pages (health, audit log, consents) need canSystem; settings are readable with canRead and
+ * changed with canSystem;
  * the team section needs a Super Admin; DELETE needs canDelete, other writes canWrite, reads canRead.
  */
 export function permissionFor(method: string, rawPath: string): PermissionNeed[] {
@@ -96,7 +97,9 @@ export function permissionFor(method: string, rawPath: string): PermissionNeed[]
   const needs: PermissionNeed[] = ["canRead"];
   if (path.startsWith("/team")) return write ? ["canRead", "superAdmin"] : ["canRead", "canSystem"];
   if (path.startsWith("/billing")) needs.push("canBilling");
-  if (path.startsWith("/health") || path.startsWith("/audit") || path.startsWith("/settings") || path.startsWith("/consents")) {
+  // Settings: anyone with console access can read them; changing them is a system action.
+  if (path.startsWith("/settings")) return write ? ["canRead", "canSystem"] : ["canRead"];
+  if (path.startsWith("/health") || path.startsWith("/audit") || path.startsWith("/consents")) {
     needs.push("canSystem");
   }
   if (m === "DELETE") needs.push("canDelete");
