@@ -122,7 +122,7 @@ function jdHas(jdRaw: string, jdNorm: string, term: string): boolean {
     while ((m = re.exec(jdRaw))) {
       const before = jdRaw.slice(0, m.index + m[1].length).trimEnd();
       if (term === "go" && (before === "" || /[.!?:\n•\-]$/.test(before))) continue;
-      if (term === "go" && /^Go[\s-]+(to|live|above|beyond)/.test(jdRaw.slice(m.index + m[1].length))) continue;
+      if (term === "go" && /^go[\s-]+(to|live|above|beyond|getter|for|ahead|back|out|through|with|and|beyond)\b/i.test(jdRaw.slice(m.index + m[1].length))) continue;
       return true;
     }
     return false;
@@ -133,7 +133,7 @@ function jdHas(jdRaw: string, jdNorm: string, term: string): boolean {
 /* ------------------------------------------------------------------ resume model */
 
 type Bullet = { text: string; sectionId: string; section: AtsIssueSection; itemIndex: number; fieldPath: string; where: string };
-type Model = {
+export type Model = {
   header: Rec | null;
   name: string;
   headline: string;
@@ -371,7 +371,7 @@ export function buildModel(content: unknown): Model {
 
 /* ------------------------------------------------------------------ keywords */
 
-type JdTerm = { term: string; spelling: string; group: "required" | "niceToHave"; count: number; label?: string };
+export type JdTerm = { term: string; spelling: string; group: "required" | "niceToHave"; count: number; label?: string };
 
 const DISPLAY: Record<string, string> = {
   aws: "AWS", gcp: "GCP", sql: "SQL", "ci/cd": "CI/CD", iam: "IAM", eks: "EKS", ec2: "EC2", s3: "S3", html: "HTML", css: "CSS",
@@ -418,7 +418,10 @@ export function jdKeywords(jd: string, extra: string[] = []): JdTerm[] {
   // Drop a term that is only part of a longer found term ("sql" inside "postgresql" is a separate word, so it stays).
   for (const t of [...found.keys()]) {
     for (const other of found.keys()) {
-      if (other !== t && other.includes(" ") && other.split(" ").includes(t) && found.get(t)!.count <= found.get(other)!.count) found.delete(t);
+      if (other !== t && other.includes(" ") && other.split(" ").includes(t) && found.get(t)!.count <= found.get(other)!.count) {
+        found.delete(t);
+        break;
+      }
     }
   }
   // Context: lines after a "Nice to have / Preferred" heading (or with "a plus" inline) are nice-to-have.
@@ -967,4 +970,100 @@ export function strengthenSummary(text: string, ctx: { role?: string; keywords?:
   if (kw.length) t += ` Skilled in ${kw.length > 1 ? `${kw.slice(0, -1).join(", ")} and ${kw[kw.length - 1]}` : kw[0]}.`;
   if (!QUANT.test(t)) t += " Track record of [measurable result, e.g. 30% growth].";
   return t.replace(/\.\./g, ".");
+}
+
+
+/* ------------------------------------------------------------------ job match (Batch 4) */
+
+export type JobMatch = { score: number; matched: string[]; missing: string[]; basis: "keywords" | "title" | "none" };
+
+/**
+ * ATS match % of a resume against one job, using the same keyword / synonym / semantic matcher as the
+ * checker. `required` / `nice` are canonical terms pre-extracted from the job (see jobKeywordTerms).
+ */
+export function matchJobTerms(m: Model, required: string[], nice: string[], title = ""): JobMatch {
+  const weight = { exact: 1, synonym: 0.9, semantic: 0.6 } as const;
+  const seen = new Set<string>();
+  const terms = [
+    ...required.map((t) => ({ t, imp: 2 })),
+    ...nice.map((t) => ({ t, imp: 1 })),
+  ].filter(({ t }) => {
+    const c = canonical(t);
+    if (!c || seen.has(c)) return false;
+    seen.add(c);
+    return true;
+  });
+  let got = 0;
+  let total = 0;
+  const matched: string[] = [];
+  const missing: string[] = [];
+  for (const { t, imp } of terms) {
+    total += imp;
+    const hit = matchTerm(m, t);
+    if (hit) {
+      got += imp * weight[hit.kind];
+      matched.push(prettyKeyword(t));
+    } else missing.push(prettyKeyword(t));
+  }
+  const tScore = titleRelevance(m, title);
+  if (terms.length >= 2) {
+    // Same curve as the checker (~85% weighted coverage = full), damped when the post names few skills.
+    const cov = Math.min(1, total ? got / total / 0.85 : 0);
+    const kwScore = cov * (0.6 + 0.4 * Math.min(1, terms.length / 6));
+    const score = Math.round(100 * (0.7 * kwScore + 0.3 * tScore));
+    return { score: Math.max(0, Math.min(100, score)), matched, missing, basis: "keywords" };
+  }
+  // Too few skills in the post: title relevance only, capped at 60%.
+  if (tScore === 0 && !title.trim()) return { score: 0, matched, missing, basis: "none" };
+  return { score: Math.round(60 * tScore), matched, missing, basis: "title" };
+}
+
+const TITLE_STOP = /^(senior|sr|junior|jr|lead|staff|principal|head|remote|the|and|for|with|mid|level|full|time|part|intern|internship|working|student|werkstudent|stage|mwd|gn|all|genders|of|in|at|to|eu|uk|us|emea|europe|global|hybrid|onsite|contract|freelance|permanent|cdi|cdd|new|team|i|ii|iii|iv)$/;
+
+/** 0..1: how much of the job title appears in the resume headline / experience titles (whole resume counts half). */
+function titleRelevance(m: Model, title: string): number {
+  const words = title
+    .toLowerCase()
+    .replace(/\([^)]*\)|\[[^\]]*\]/g, " ")
+    .split(/[^a-z0-9+#]+/)
+    .filter((w) => w.length > 1 && !TITLE_STOP.test(w) && !/^\d+$/.test(w));
+  if (!words.length) return 0;
+  const titles = norm(
+    [m.headline, ...m.experience.map((e) => `${txt((e as Rec).title)} ${txt((e as Rec).position)}`)].join(" ").replace(/[^A-Za-z0-9+#\s]/g, " ")
+  );
+  const titleStems = new Set(words.length ? titles.trim().split(/\s+/).map(stem) : []);
+  let hit = 0;
+  for (const w of words) {
+    if (hasTerm(titles, w) || titleStems.has(stem(w))) hit += 1;
+    else if (hasTerm(m.normAll, w)) hit += 0.5;
+  }
+  return Math.min(1, hit / words.length);
+}
+
+let VOCAB: Set<string> | null = null;
+function jobVocab(): Set<string> {
+  if (!VOCAB) VOCAB = new Set<string>([...SKILL_TERMS, ...TOOL_TERMS, ...SYNONYMS.flat()].map((x) => canonical(x)));
+  return VOCAB;
+}
+
+/** Required / nice-to-have canonical terms of a job post (title + description + provider tags). */
+export function jobKeywordTerms(title: string, description: string, tags: string[] = [], companyName = ""): { required: string[]; nice: string[] } {
+  const text = `${title}\n${description}`;
+  // "Snowflake" the employer is not the Snowflake skill.
+  const company = companyName.toLowerCase().trim();
+  // Only known skills / tools / synonyms: free-text keywords from long job posts are too noisy for a % score.
+  const vocab = jobVocab();
+  const terms = jdKeywords(text).filter((t) => vocab.has(t.term) && !(company && company.includes(t.term)));
+  const required = terms.filter((t) => t.group === "required").map((t) => t.term);
+  const nice = terms.filter((t) => t.group === "niceToHave").map((t) => t.term);
+  const have = new Set(terms.map((t) => t.term));
+  // Provider tags that are real skills (RemoteOK: "react", "aws") count as nice-to-have.
+  for (const tag of tags) {
+    const c = canonical(tag.toLowerCase());
+    if (!c || have.has(c)) continue;
+    if (!vocab.has(c) || (company && company.includes(c))) continue;
+    have.add(c);
+    nice.push(c);
+  }
+  return { required: required.slice(0, 18), nice: nice.slice(0, 12) };
 }

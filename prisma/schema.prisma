@@ -8,25 +8,25 @@ datasource db {
 }
 
 model User {
-  id               String            @id @default(cuid())
-  email            String            @unique
+  id               String           @id @default(cuid())
+  email            String           @unique
   passwordHash     String
   name             String?
-  role             String            @default("user")
+  role             String           @default("user")
   location         String?
   country          String?
   city             String?
   /// ACTIVE | SUSPENDED | DELETED (soft delete). Only ACTIVE accounts can sign in.
-  status           String            @default("ACTIVE")
+  status           String           @default("ACTIVE")
   /// FREE | PRO (billing plan shown in the admin console).
-  plan             String            @default("FREE")
+  plan             String           @default("FREE")
   suspendedAt      DateTime?
   deletedAt        DateTime?
   lastLoginAt      DateTime?
   emailVerifiedAt  DateTime?
-  sessionEpoch     Int               @default(0)
-  createdAt        DateTime          @default(now())
-  updatedAt        DateTime          @updatedAt
+  sessionEpoch     Int              @default(0)
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
   resumes          Resume[]
   coverLetters     CoverLetter[]
   applications     JobApplication[]
@@ -59,7 +59,9 @@ model AuthToken {
   @@index([expiresAt])
 }
 
-/** SSO link: one row per provider identity (Google sub / Facebook id), linked by verified email. */
+/**
+ * SSO link: one row per provider identity (Google sub / Facebook id), linked by verified email.
+ */
 model OAuthAccount {
   id             String   @id @default(cuid())
   provider       String
@@ -184,34 +186,35 @@ model AdminAuditLog {
 }
 
 model Resume {
-  id          String        @id @default(cuid())
-  userId      String
-  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  title       String
-  templateId  String
-  layoutKey   String
-  content     Json
-  design      Json
-  isComplete     Boolean       @default(false)
-  shareEnabled   Boolean       @default(false)
-  shareToken     String?       @unique
+  id             String           @id @default(cuid())
+  userId         String
+  user           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title          String
+  templateId     String
+  layoutKey      String
+  content        Json
+  design         Json
+  isComplete     Boolean          @default(false)
+  shareEnabled   Boolean          @default(false)
+  shareToken     String?          @unique
   shareExpiresAt DateTime?
-  createdAt      DateTime      @default(now())
-  updatedAt   DateTime      @updatedAt
-  coverLetter CoverLetter?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  coverLetter    CoverLetter?
+  applications   JobApplication[]
 
   @@index([userId])
 }
 
 model CoverLetter {
-  id        String   @id @default(cuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id                 String    @id @default(cuid())
+  userId             String
+  user               User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   // BUG-315: a letter can exist without a resume, and survives the resume being deleted.
-  resumeId  String?  @unique
-  resume    Resume?  @relation(fields: [resumeId], references: [id], onDelete: SetNull)
-  title     String
-  body      String
+  resumeId           String?   @unique
+  resume             Resume?   @relation(fields: [resumeId], references: [id], onDelete: SetNull)
+  title              String
+  body               String
   // Batch 2: auto cover letter from a finalized resume. source: "ai" | "template" | null (hand-written).
   tone               String    @default("professional")
   targetRole         String?
@@ -221,8 +224,8 @@ model CoverLetter {
   generatedAt        DateTime?
   // The linked resume was edited after this letter was generated (shows "regenerate?").
   resumeUpdatedAfter Boolean   @default(false)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
 
   @@index([userId])
 }
@@ -238,7 +241,9 @@ model Template {
   previewLabel String
 }
 
-/** Admin-uploaded landing templates (PDF + preview) */
+/**
+ * Admin-uploaded landing templates (PDF + preview)
+ */
 model LandingTemplate {
   id          String   @id @default(cuid())
   name        String
@@ -272,18 +277,45 @@ model Job {
   keywords     String[]
   createdAt    DateTime         @default(now())
   applications JobApplication[]
+  /// Batch 4 real feeds: "catalog" (seeded/legacy), "custom" (tracker card) or a live provider id.
+  source       String           @default("catalog")
+  externalId   String?
+  salary       String?
+  tags         String[]         @default([])
+  niceKeywords String[]         @default([])
+  postedAt     DateTime?
+  fetchedAt    DateTime?
+  active       Boolean          @default(true)
+  dedupeKey    String?
+
+  @@unique([source, externalId])
+  @@index([source, active])
+}
+
+/// Last fetch of each live job provider (cache TTL + refresh throttling).
+model JobFeedState {
+  source    String   @id
+  fetchedAt DateTime
+  ok        Boolean  @default(true)
+  count     Int      @default(0)
+  error     String?
 }
 
 model JobApplication {
-  id        String   @id @default(cuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  jobId     String
-  job       Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
-  stage     String   @default("recommended")
-  notes     String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id         String    @id @default(cuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  jobId      String
+  job        Job       @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  stage      String    @default("recommended")
+  notes      String?
+  resumeId   String?
+  resume     Resume?   @relation(fields: [resumeId], references: [id], onDelete: SetNull)
+  atsMatch   Int?
+  appliedAt  DateTime?
+  followUpAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
 
   @@unique([userId, jobId])
   @@index([userId])
