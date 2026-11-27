@@ -22,7 +22,9 @@ import {
 } from "../lib/exportFormats";
 import { adminGuard, adminOf } from "../lib/adminAuth";
 import { auditAdmin } from "../lib/adminAudit";
-import { exportLimitFor, getExportSettings, startOfUtcMonth, type ExportSettings } from "../lib/exportSettings";
+import { exportLimitFor, exportPlanOf, getExportSettings, startOfUtcMonth, type ExportSettings } from "../lib/exportSettings";
+import { DEFAULT_ADMIN_SETTINGS, getAdminSettings } from "../lib/appSettings";
+import { sectionLimitDecision, type SectionLimitBody } from "../lib/sectionGate";
 
 function fontBase64(fileName: string): string | null {
   const bundled = path.resolve(process.cwd(), "../frontend/public/fonts", fileName);
@@ -682,6 +684,27 @@ async function exportLimitError(user: { userId: string; role?: string }, setting
   }
 }
 
+/**
+ * Free-plan section limit for PDF download (admin settings). Returns the 402 body when blocked.
+ * Plan comes from the role and the billing plan in the database, like the monthly export cap.
+ */
+async function sectionLimitError(user: { userId: string; role?: string }, content: unknown): Promise<SectionLimitBody | null> {
+  if (user.role === "admin") return null;
+  let plan: string | null | undefined = null;
+  try {
+    plan = (await prisma.user.findUnique({ where: { id: user.userId }, select: { plan: true } }))?.plan;
+  } catch {
+    plan = null;
+  }
+  let freeLimits = DEFAULT_ADMIN_SETTINGS.freeLimits;
+  try {
+    freeLimits = (await getAdminSettings()).freeLimits;
+  } catch {
+    // Settings not readable: the default limit still applies to Free accounts.
+  }
+  return sectionLimitDecision(exportPlanOf(user.role, plan), freeLimits, content);
+}
+
 async function recordExport(data: { userId: string; resumeId: string; templateId?: string | null; format: string; pageSize?: string | null }) {
   try {
     await prisma.exportEvent.create({ data });
@@ -965,6 +988,8 @@ export async function exportRoutes(app: FastifyInstance) {
     if (format === "pdf") {
       const limitError = await exportLimitError(request.user, settings);
       if (limitError) return reply.code(429).send({ error: limitError, code: "EXPORT_LIMIT" });
+      const sectionBlock = await sectionLimitError(request.user, row.content);
+      if (sectionBlock) return reply.code(402).send(sectionBlock);
       const pageSize = pageSizeOf(row.design, settings.defaultPageSize);
       return buildPdfReply(reply, request, row.id, pageSize, baseName, {
         ...pdfExtrasFor(settings, request.user.role),
@@ -1020,6 +1045,12 @@ export async function exportRoutes(app: FastifyInstance) {
     const title = (body.title || row.title || "Resume").trim().slice(0, 100) || "Resume";
     const baseName = safeFileName(body.filename || title, "Resume");
     const html = resumeToHtml(scrubSampleText(content), design, title, body.layoutKey ?? row.layoutKey);
+
+    // Free-plan section limit: counted on the exact content that would be printed.
+    if (format === "pdf") {
+      const sectionBlock = await sectionLimitError(request.user, content);
+      if (sectionBlock) return reply.code(402).send(sectionBlock);
+    }
 
     // Persist latest design/content so next GET export matches too
     if (body.content !== undefined || body.design !== undefined || body.title) {

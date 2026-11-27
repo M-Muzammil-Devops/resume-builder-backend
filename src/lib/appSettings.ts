@@ -3,7 +3,8 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../prisma";
 import { env } from "../config/env";
 import { mailConfigured } from "./mailer";
-import { getExportSettings, saveExportSettings } from "./exportSettings";
+import { exportPlanOf, getExportSettings, saveExportSettings } from "./exportSettings";
+import { DEFAULT_FREE_PDF_SECTION_LIMIT, effectiveSectionLimit } from "../shared/sectionLimit";
 
 /**
  * Admin Settings (AppSetting key "admin"). The free-plan PDF export limit and the free watermark are the
@@ -21,6 +22,10 @@ export const adminSettingsSchema = z.object({
     maxResumes: z.number().int().min(0).max(1000),
     /** "Made with ResumeBuilder" footer on Free PDFs. Live: export settings. */
     watermark: z.boolean(),
+    /** Free plan: PDF download is blocked above this many sections (Header excluded; 0 = unlimited). */
+    maxSectionsForFreePdf: z.number().int().min(0).max(100),
+    /** Free plan: section limit for PDF download on/off. */
+    enforceFreeSectionLimit: z.boolean(),
   }),
   registrationOpen: z.boolean(),
   maintenance: z.object({
@@ -30,12 +35,21 @@ export const adminSettingsSchema = z.object({
 });
 
 export type AdminSettings = z.infer<typeof adminSettingsSchema>;
-type StoredSettings = Omit<AdminSettings, "freeLimits"> & { freeLimits: { audioMinutesPerMonth: number; maxResumes: number } };
+type StoredSettings = Omit<AdminSettings, "freeLimits"> & {
+  freeLimits: { audioMinutesPerMonth: number; maxResumes: number; maxSectionsForFreePdf: number; enforceFreeSectionLimit: boolean };
+};
 
 export const DEFAULT_ADMIN_SETTINGS: AdminSettings = {
   siteName: "ResumeBuilder",
   supportEmail: "",
-  freeLimits: { pdfExportsPerMonth: 5, audioMinutesPerMonth: 20, maxResumes: 5, watermark: true },
+  freeLimits: {
+    pdfExportsPerMonth: 5,
+    audioMinutesPerMonth: 20,
+    maxResumes: 5,
+    watermark: true,
+    maxSectionsForFreePdf: DEFAULT_FREE_PDF_SECTION_LIMIT,
+    enforceFreeSectionLimit: true,
+  },
   registrationOpen: true,
   maintenance: { enabled: false, message: "We are doing a short update. Please check back in a few minutes." },
 };
@@ -64,6 +78,8 @@ export function normalizeAdminSettings(raw: unknown, live?: { pdfExportsPerMonth
       audioMinutesPerMonth: pick(f.audioMinutesPerMonth, fl.audioMinutesPerMonth, d.freeLimits.audioMinutesPerMonth),
       maxResumes: pick(f.maxResumes, fl.maxResumes, d.freeLimits.maxResumes),
       watermark: live ? live.watermark : pick(f.watermark, fl.watermark, d.freeLimits.watermark),
+      maxSectionsForFreePdf: pick(f.maxSectionsForFreePdf, fl.maxSectionsForFreePdf, d.freeLimits.maxSectionsForFreePdf),
+      enforceFreeSectionLimit: pick(f.enforceFreeSectionLimit, fl.enforceFreeSectionLimit, d.freeLimits.enforceFreeSectionLimit),
     },
     registrationOpen: pick(s.registrationOpen, o.registrationOpen, d.registrationOpen),
     maintenance: {
@@ -92,7 +108,12 @@ export async function saveAdminSettings(input: AdminSettings): Promise<AdminSett
   const stored: StoredSettings = {
     siteName: clean.siteName,
     supportEmail: clean.supportEmail,
-    freeLimits: { audioMinutesPerMonth: clean.freeLimits.audioMinutesPerMonth, maxResumes: clean.freeLimits.maxResumes },
+    freeLimits: {
+      audioMinutesPerMonth: clean.freeLimits.audioMinutesPerMonth,
+      maxResumes: clean.freeLimits.maxResumes,
+      maxSectionsForFreePdf: clean.freeLimits.maxSectionsForFreePdf,
+      enforceFreeSectionLimit: clean.freeLimits.enforceFreeSectionLimit,
+    },
     registrationOpen: clean.registrationOpen,
     maintenance: clean.maintenance,
   };
@@ -107,6 +128,21 @@ export async function saveAdminSettings(input: AdminSettings): Promise<AdminSett
   }
   cache = null;
   return getAdminSettings(true);
+}
+
+/**
+ * Free-plan section limit for PDF download for one account: 0 = unlimited (Pro, Admin, switched off, or 0).
+ * A settings read error falls back to the default limit for Free accounts.
+ */
+export async function pdfSectionLimitFor(role: string | null | undefined, billingPlan: string | null | undefined): Promise<number> {
+  const plan = exportPlanOf(role, billingPlan);
+  let fl: AdminSettings["freeLimits"] = DEFAULT_ADMIN_SETTINGS.freeLimits;
+  try {
+    fl = (await getAdminSettings()).freeLimits;
+  } catch {
+    // keep defaults
+  }
+  return effectiveSectionLimit(plan, { enabled: fl.enforceFreeSectionLimit, max: fl.maxSectionsForFreePdf });
 }
 
 /** False when an admin turned new sign-ups off. Fails open (a settings read error never blocks sign-ups). */

@@ -2,7 +2,8 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "../prisma";
 import { publicError } from "../lib/httpErrors";
-import { getAdminSettings } from "../lib/appSettings";
+import { getAdminSettings, pdfSectionLimitFor } from "../lib/appSettings";
+import { countResumeSections } from "../shared/sectionLimit";
 import { exportLimitFor, exportPlanOf, getExportSettings, startOfUtcMonth } from "../lib/exportSettings";
 import { profileSteps, resumeReadiness, starterTexts, startOfNextUtcMonth } from "../lib/dashboardSummary";
 import { storedResumeContent, storedResumeDesign } from "../lib/resumeContent";
@@ -34,6 +35,15 @@ function iso(d: Date | null | undefined) {
 }
 
 export async function userDashboardRoutes(app: FastifyInstance) {
+  /** PDF download rules for the signed-in account (editor Download dialog). 0 = unlimited. */
+  app.get("/user/pdf-rules", { preHandler: [app.authenticate] }, async (request, reply) => {
+    const user = await prisma.user.findUnique({ where: { id: request.user.userId }, select: { role: true, plan: true } });
+    if (!user) return reply.code(401).send({ error: "Unauthorized" });
+    const plan = exportPlanOf(user.role, user.plan);
+    reply.header("Cache-Control", "no-store");
+    return { plan: plan === "free" ? "FREE" : plan === "admin" ? "ADMIN" : "PRO", sectionLimit: await pdfSectionLimitFor(user.role, user.plan) };
+  });
+
   /** Everything the User Dashboard v2 shows, from the signed-in user's own rows only. */
   app.get("/user/dashboard-summary", { preHandler: [app.authenticate] }, async (request, reply) => {
     const userId = request.user.userId;
@@ -61,6 +71,7 @@ export async function userDashboardRoutes(app: FastifyInstance) {
       getExportSettings(),
       resumeLimitFor(user.role, user.plan),
     ]);
+    const pdfSectionLimit = await pdfSectionLimitFor(user.role, user.plan);
 
     let audioLimit = 0;
     try {
@@ -85,6 +96,8 @@ export async function userDashboardRoutes(app: FastifyInstance) {
         score,
         status: r.isComplete || score >= 80 ? "ready" : "draft",
         missing: checks.filter((c) => !c.done).map((c) => c.label),
+        /** Sections for the Free PDF section limit (Header excluded; filled and empty count). */
+        sectionCount: countResumeSections(r.content),
       };
     });
 
@@ -138,6 +151,8 @@ export async function userDashboardRoutes(app: FastifyInstance) {
         audioMinutesLimit: audioLimit,
         resumesUsed: resumes.length,
         resumesLimit: resumeLimit,
+        /** Free plan: max sections for PDF download; 0 = unlimited (Pro, Admin, or switched off). */
+        pdfSectionLimit,
       },
       coverLetterCount,
       resumes: cards,
