@@ -221,3 +221,29 @@ export async function tailorForJob(
     }
   );
 }
+
+function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return Promise.race([p, new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms))]);
+}
+
+/** Batch 3: "Fix with AI" text; null when Gemini is off, slow or fails (caller uses the rule rewrite). */
+export async function atsRewriteAi(prompt: string): Promise<string | null> {
+  if (!process.env.GEMINI_API_KEY) return null;
+  const result = await withTimeout(generateJson<{ text?: string }>(prompt, { text: "" }), 15_000, { text: "" });
+  return typeof result?.text === "string" && result.text.trim() ? result.text : null;
+}
+
+/** Batch 3: extra skills / tools Gemini reads from a job description (validated against the JD text by the engine). */
+export async function atsKeywordsAi(jobDescription: string): Promise<string[] | null> {
+  if (!process.env.GEMINI_API_KEY) return null;
+  const result = await withTimeout(
+    generateJson<{ keywords?: unknown }>(
+      `List up to 15 hard skills, tools and qualifications an ATS would filter on in this job description. Use the exact wording from the text. Return JSON {"keywords": string[]}.\nJD:\n${jobDescription.slice(0, 6000)}`,
+      { keywords: [] }
+    ),
+    10_000,
+    { keywords: [] }
+  );
+  const list = Array.isArray(result?.keywords) ? result.keywords.filter((k): k is string => typeof k === "string" && k.length > 1 && k.length < 40) : [];
+  return list.length ? list.slice(0, 15) : null;
+}
