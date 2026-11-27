@@ -75,7 +75,7 @@ export type ReadinessCheck = { key: string; label: string; done: boolean; points
  * first (same scrub as exports) and, when given, landing-template starter text too, so a fresh
  * template scores low.
  */
-export function resumeReadiness(content: unknown, starter?: Set<string>): { score: number; checks: ReadinessCheck[] } {
+export function resumeReadiness(content: unknown, starter?: Set<string>): { score: number; checks: ReadinessCheck[]; headline: string | null } {
   const scrubbed = scrubSampleText(content);
   const sections = sectionsOf(starter && starter.size ? blankStarterContent(scrubbed, starter) : scrubbed);
   const byType = (t: string) => sections.filter((s) => s.type === t);
@@ -106,7 +106,7 @@ export function resumeReadiness(content: unknown, starter?: Set<string>): { scor
     { key: "extra", label: "Extra section (projects, languages…)", done: extras >= 1, points: 10 },
   ];
   const score = checks.reduce((sum, c) => sum + (c.done ? c.points : 0), 0);
-  return { score, checks };
+  return { score, checks, headline: text(header.title).slice(0, 80) || null };
 }
 
 export type ProfileStep = { key: string; label: string; done: boolean };

@@ -70,11 +70,12 @@ export async function userDashboardRoutes(app: FastifyInstance) {
     }
 
     const cards = resumes.map((r) => {
-      const { score, checks } = resumeReadiness(r.content, starterTexts(r.templateId));
+      const { score, checks, headline } = resumeReadiness(r.content, starterTexts(r.templateId));
       const design = (r.design && typeof r.design === "object" ? r.design : {}) as { accentColor?: unknown };
       return {
         id: r.id,
         title: r.title,
+        headline,
         templateId: r.templateId,
         layoutKey: r.layoutKey,
         accentColor: typeof design.accentColor === "string" && /^#[0-9a-fA-F]{3,8}$/.test(design.accentColor) ? design.accentColor : null,

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { profileSteps, resumeReadiness, starterTexts, startOfNextUtcMonth } from "./dashboardSummary";
-import { buildTemplateContent } from "../shared/templateStarter";
+import { LANDING_PRESETS, buildTemplateContent } from "../shared/templateStarter";
 import { markSampleContent } from "../shared/sampleMarks";
 import { exportLimitFor, exportPlanOf, normalizeExportSettings } from "./exportSettings";
 
@@ -41,6 +41,15 @@ test("dashboard: untouched template sample text never counts", () => {
   // A fresh template: every text field still carries its sample mark.
   const sample = markSampleContent(structuredClone(full) as never);
   assert.equal(resumeReadiness(sample).score, 0);
+  assert.equal(resumeReadiness(sample).headline, null);
+});
+
+test("dashboard: headline is the job title the user wrote, never starter text", () => {
+  assert.equal(resumeReadiness(full).headline, "Product Designer");
+  for (const id of Object.keys(LANDING_PRESETS)) {
+    const r = resumeReadiness(buildTemplateContent(id), starterTexts(`tmpl-landing-${id}`));
+    assert.equal(r.headline, null, id);
+  }
 });
 
 test("dashboard: profile checklist percentage", () => {
